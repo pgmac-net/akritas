@@ -213,6 +213,50 @@ fn draw_main_panels(frame: &mut Frame, app: &mut App, area: Rect) {
     draw_tags(frame, app, cols[1]);
 }
 
+/// The two names a filterable list pane goes by in its border title.
+struct PaneTitle {
+    /// Full name, used when no query is being typed.
+    label: &'static str,
+    /// Short name, used while typing so the query has room.
+    short: &'static str,
+}
+
+/// Border title for a filterable list pane (Repos / Tags).
+///
+/// The load marker (spinner or `✗`) and the filter query are independent
+/// facts and both belong in the title. They used to be mutually exclusive —
+/// the query was only drawn in the `Idle` arm — so on a slow, paged remote
+/// load the spinner replaced what the user was typing (#146). `idle` is the
+/// caller-built title for the plain `Idle` case with no query being typed.
+fn pane_title(
+    names: PaneTitle,
+    load: &LoadState,
+    spinner: char,
+    typing: bool,
+    filter: &str,
+    idle: String,
+) -> String {
+    let marker = match load {
+        LoadState::Loading => Some(spinner),
+        LoadState::Error(_) => Some('✗'),
+        LoadState::Idle => None,
+    };
+    if typing {
+        return match marker {
+            Some(m) => format!(" {} {m} / {filter} ", names.short),
+            None => format!(" {} / {filter} ", names.short),
+        };
+    }
+    match (marker, load) {
+        (None, _) => idle,
+        // A kept filter still narrows the list while more pages arrive.
+        (Some(m), LoadState::Loading) if !filter.is_empty() => {
+            format!(" {} {m} (filtered) ", names.label)
+        }
+        (Some(m), _) => format!(" {} {m} ", names.label),
+    }
+}
+
 fn draw_repos(frame: &mut Frame, app: &mut App, area: Rect) {
     let border_style = if app.focus == Focus::Repos {
         ACTIVE_BORDER
@@ -221,20 +265,23 @@ fn draw_repos(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let spinner_char = SPINNER[app.spinner_tick % SPINNER.len()];
-    let title = match &app.repo_load {
-        LoadState::Loading => format!(" Repositories {spinner_char} "),
-        LoadState::Error(_) => " Repositories ✗ ".to_owned(),
-        LoadState::Idle => {
-            let count = app.repos.len();
-            if app.filter_mode == Some(Focus::Repos) {
-                format!(" Repos / {} ", app.repo_filter)
-            } else if !app.repo_filter.is_empty() {
-                format!(" Repositories [{count}] (filtered) ")
-            } else {
-                format!(" Repositories ({count}) ")
-            }
-        }
+    let count = app.repos.len();
+    let idle = if app.repo_filter.is_empty() {
+        format!(" Repositories ({count}) ")
+    } else {
+        format!(" Repositories [{count}] (filtered) ")
     };
+    let title = pane_title(
+        PaneTitle {
+            label: "Repositories",
+            short: "Repos",
+        },
+        &app.repo_load,
+        spinner_char,
+        app.filter_mode == Some(Focus::Repos),
+        &app.repo_filter,
+        idle,
+    );
 
     let block = Block::default()
         .title(title)
@@ -270,20 +317,23 @@ fn draw_tags(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let spinner_char = SPINNER[app.spinner_tick % SPINNER.len()];
     let sort_label = app.tag_sort.label();
-    let title = match &app.tag_load {
-        LoadState::Loading => format!(" Tags {spinner_char} "),
-        LoadState::Error(_) => " Tags ✗ ".to_owned(),
-        LoadState::Idle => {
-            let count = app.tags.len();
-            if app.filter_mode == Some(Focus::Tags) {
-                format!(" Tags / {} ", app.tag_filter)
-            } else if !app.tag_filter.is_empty() {
-                format!(" Tags [{count}] (filtered) [{sort_label}] ")
-            } else {
-                format!(" Tags ({count}) [{sort_label}] ")
-            }
-        }
+    let count = app.tags.len();
+    let idle = if app.tag_filter.is_empty() {
+        format!(" Tags ({count}) [{sort_label}] ")
+    } else {
+        format!(" Tags [{count}] (filtered) [{sort_label}] ")
     };
+    let title = pane_title(
+        PaneTitle {
+            label: "Tags",
+            short: "Tags",
+        },
+        &app.tag_load,
+        spinner_char,
+        app.filter_mode == Some(Focus::Tags),
+        &app.tag_filter,
+        idle,
+    );
 
     let block = Block::default()
         .title(title)
@@ -1826,5 +1876,75 @@ mod tests {
             !content.contains(MASK_CHAR),
             "non-secret input must not be masked"
         );
+    }
+
+    #[test]
+    fn repos_title_keeps_typed_query_visible_while_loading() {
+        let mut app = make_app();
+        app.repo_load = LoadState::Loading;
+        app.filter_mode = Some(Focus::Repos);
+        app.repo_filter = "nginx".to_owned();
+        let out = render_to_string(&mut app, 100, 30);
+        assert!(
+            out.contains("/ nginx"),
+            "the typed query must stay visible while repos load"
+        );
+    }
+
+    #[test]
+    fn tags_title_keeps_typed_query_visible_while_loading() {
+        let mut app = make_app();
+        app.tag_load = LoadState::Loading;
+        app.filter_mode = Some(Focus::Tags);
+        app.tag_filter = "latest".to_owned();
+        let out = render_to_string(&mut app, 100, 30);
+        assert!(
+            out.contains("/ latest"),
+            "the typed query must stay visible while tags load"
+        );
+    }
+
+    fn title_for(load: &LoadState, typing: bool, filter: &str) -> String {
+        pane_title(
+            PaneTitle {
+                label: "Repositories",
+                short: "Repos",
+            },
+            load,
+            '⠹',
+            typing,
+            filter,
+            " IDLE ".to_owned(),
+        )
+    }
+
+    #[test]
+    fn pane_title_matrix() {
+        let err = LoadState::Error("x".to_owned());
+        // Typing: query shows in every state.
+        assert_eq!(
+            title_for(&LoadState::Loading, true, "nginx"),
+            " Repos ⠹ / nginx "
+        );
+        assert_eq!(title_for(&err, true, "nginx"), " Repos ✗ / nginx ");
+        assert_eq!(
+            title_for(&LoadState::Idle, true, "nginx"),
+            " Repos / nginx "
+        );
+        // Kept filter: loading says it is filtered; error and idle unchanged.
+        assert_eq!(
+            title_for(&LoadState::Loading, false, "nginx"),
+            " Repositories ⠹ (filtered) "
+        );
+        assert_eq!(title_for(&err, false, "nginx"), " Repositories ✗ ");
+        assert_eq!(title_for(&LoadState::Idle, false, "nginx"), " IDLE ");
+        // No filter.
+        assert_eq!(
+            title_for(&LoadState::Loading, false, ""),
+            " Repositories ⠹ "
+        );
+        assert_eq!(title_for(&err, false, ""), " Repositories ✗ ");
+        // Typing with an empty query still shows the prompt.
+        assert_eq!(title_for(&LoadState::Loading, true, ""), " Repos ⠹ /  ");
     }
 }
