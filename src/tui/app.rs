@@ -1,3 +1,4 @@
+use crate::ops::delete::{SIBLING_LOOKUP_LIMIT, SiblingReport};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -13,7 +14,9 @@ use super::detail::ImageDetail;
 use super::input::InputState;
 use super::jsonview::{self, RowMeta};
 
-const STATUS_TTL: Duration = Duration::from_secs(2);
+/// How long an operation's outcome stays in the footer — long enough to read
+/// a delete report naming the sibling tags it took with it.
+const STATUS_TTL: Duration = Duration::from_secs(5);
 const LOAD_AHEAD: usize = 20;
 pub const SPINNER: [char; 6] = ['⠋', '⠙', '⠸', '⠴', '⠦', '⠇'];
 
@@ -420,6 +423,9 @@ pub fn help_context_for(modal: &Modal, focus: Focus) -> HelpContext {
 #[derive(Debug)]
 pub enum Modal {
     None,
+    /// Delete confirmation with the sibling-tag check (#163). Like
+    /// `Confirm`, it shows its own keys inline, so Help falls back to Normal.
+    DeleteConfirm(DeleteConfirm),
     Confirm {
         message: String,
         on_confirm: ConfirmAction,
@@ -597,8 +603,135 @@ pub fn ecr_region_suggestions(profile_region: Option<&str>, current: Option<&str
 
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    DeleteManifest { repo: String, tag: String },
     PruneDigestTags { repo: String, tags: Vec<String> },
+}
+
+/// Where the pre-delete sibling check has got to (#163).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteLookup {
+    /// Resolving the tag's digest and checking the other loaded tags.
+    Pending,
+    /// The tag's own digest could not be resolved, so there is no confirmed
+    /// manifest to delete safely.
+    Failed(String),
+    /// Too many loaded tags to check one by one; the dialog warns
+    /// generically instead.
+    Skipped {
+        total: usize,
+    },
+    Done(SiblingReport),
+}
+
+/// What the delete dialog needs to fire a delete for a specific tag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteLookupRequest {
+    pub repo: String,
+    pub tag: String,
+    /// The other loaded tags to check, or `None` above the lookup limit.
+    pub others: Option<Vec<String>>,
+    /// How many other tags are loaded (shown when the lookup is skipped).
+    pub total: usize,
+    pub more_unloaded: bool,
+}
+
+/// The delete confirmation dialog.
+///
+/// Deleting is by manifest digest, so the dialog resolves and **pins** the
+/// digest (the delete is refused if the tag has moved by the time `y` is
+/// pressed) and lists the other tags that will vanish with it. It never says
+/// "no other tags" unless every tag was actually checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteConfirm {
+    pub repo: String,
+    pub tag: String,
+    pub digest: Option<String>,
+    pub lookup: DeleteLookup,
+}
+
+/// Names listed in the dialog before collapsing to "…and N more".
+const DELETE_SIBLINGS_SHOWN: usize = 10;
+
+impl DeleteConfirm {
+    /// `y` only acts once the digest is pinned and the check has finished.
+    pub fn can_confirm(&self) -> bool {
+        self.digest.is_some()
+            && matches!(
+                self.lookup,
+                DeleteLookup::Done(_) | DeleteLookup::Skipped { .. }
+            )
+    }
+
+    /// The dialog body, one entry per line. Pure, so the renderer and the
+    /// tests read exactly the same text.
+    pub fn message_lines(&self) -> Vec<String> {
+        let mut lines = vec![format!("Delete '{}:{}'?", self.repo, self.tag)];
+        if let Some(d) = &self.digest {
+            lines.push(format!("Manifest {}", short_digest(d)));
+        }
+        lines.push(String::new());
+        match &self.lookup {
+            DeleteLookup::Pending => {
+                lines.push("Checking other tags for the same manifest…".to_owned());
+            }
+            DeleteLookup::Failed(e) => {
+                lines.push(format!("Could not resolve this tag's digest: {e}"));
+                lines.push("Nothing can be deleted safely.".to_owned());
+            }
+            DeleteLookup::Skipped { total } => {
+                lines.push(format!(
+                    "{total} other tags loaded — too many to check one by one."
+                ));
+                lines.push("Every tag pointing at this manifest will be deleted too.".to_owned());
+            }
+            DeleteLookup::Done(report) => {
+                if report.siblings.is_empty() {
+                    lines.push(if report.is_complete() {
+                        "No other tag points at this manifest.".to_owned()
+                    } else {
+                        "No other checked tag points at this manifest.".to_owned()
+                    });
+                } else {
+                    let n = report.siblings.len();
+                    lines.push(format!(
+                        "Also removes {n} other tag{} pointing at the same manifest:",
+                        if n == 1 { "" } else { "s" }
+                    ));
+                    let shown: Vec<&str> = report
+                        .siblings
+                        .iter()
+                        .take(DELETE_SIBLINGS_SHOWN)
+                        .map(String::as_str)
+                        .collect();
+                    lines.push(format!("  {}", shown.join(", ")));
+                    if n > DELETE_SIBLINGS_SHOWN {
+                        lines.push(format!("  …and {} more", n - DELETE_SIBLINGS_SHOWN));
+                    }
+                }
+                if report.unchecked > 0 {
+                    lines.push(format!(
+                        "Could not check {} tag{}.",
+                        report.unchecked,
+                        if report.unchecked == 1 { "" } else { "s" }
+                    ));
+                }
+                if report.more_unloaded {
+                    lines.push("More tags exist that were not loaded — not checked.".to_owned());
+                }
+            }
+        }
+        lines.push(String::new());
+        lines.push(if self.can_confirm() {
+            "[y] Delete  [n/Esc] Cancel".to_owned()
+        } else {
+            "[n/Esc] Cancel".to_owned()
+        });
+        lines
+    }
+}
+
+/// `sha256:` plus the first 12 hex digits — enough to tell manifests apart.
+pub fn short_digest(digest: &str) -> String {
+    digest.chars().take(19).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -689,6 +822,9 @@ pub struct App {
     pub detail: Option<ImageDetail>,
     pub detail_scroll: usize,
     pub current_tag: Option<String>,
+    /// After a delete reloads the tag list, the tag to select once the first
+    /// page arrives — the deleted tag's nearest surviving neighbour.
+    pending_tag_select: Option<String>,
     // Display
     pub registry_name: String,
     pub registry_url: String,
@@ -783,6 +919,7 @@ impl App {
             detail: None,
             detail_scroll: 0,
             current_tag: None,
+            pending_tag_select: None,
             registry_name,
             registry_url,
             modal: Modal::None,
@@ -880,6 +1017,11 @@ impl App {
         self.apply_tag_filter_sort();
         if was_empty && !self.tags.is_empty() {
             self.tags_state.select(Some(0));
+            if let Some(want) = self.pending_tag_select.take()
+                && let Some(i) = self.tags.iter().position(|t| *t == want)
+            {
+                self.tags_state.select(Some(i));
+            }
         }
     }
 
@@ -953,6 +1095,7 @@ impl App {
         self.filter_mode = None;
         self.catalog_attempt = CatalogAttempt::Initial;
         self.current_artifactory_repo_key = None;
+        self.pending_tag_select = None;
         self.load_repo_seeds();
     }
 
@@ -1849,15 +1992,53 @@ impl App {
         self.status.as_ref().map(|s| s.text.as_str())
     }
 
-    pub fn on_delete_success(&mut self, repo: &str, tag: &str) {
-        self.tags_all.retain(|t| t != tag);
-        self.apply_tag_filter_sort();
-        if self.current_tag.as_deref() == Some(tag) {
-            self.detail = None;
-            self.detail_load = LoadState::Idle;
-            self.current_tag = None;
-        }
-        self.set_status(format!("✓ Deleted {repo}:{tag}"));
+    /// After a successful delete: report what went, remember which tag to
+    /// land on, and restart the tag load so the list matches the server.
+    ///
+    /// The list is reloaded rather than patched because only the server
+    /// knows every tag that vanished — the sibling check may have been
+    /// skipped, partial, or out of date. The caller must spawn the fetch.
+    pub fn on_delete_success(
+        &mut self,
+        repo: &str,
+        tag: &str,
+        digest: &str,
+        also_removed: &[String],
+        complete: bool,
+    ) {
+        let gone = |t: &String| t == tag || also_removed.contains(t);
+        let neighbour = self.tags.iter().position(|t| t == tag).and_then(|i| {
+            self.tags[i + 1..]
+                .iter()
+                .find(|t| !gone(t))
+                .or_else(|| self.tags[..i].iter().rev().find(|t| !gone(t)))
+                .cloned()
+        });
+
+        let status = if !also_removed.is_empty() {
+            const SHOWN: usize = 5;
+            let mut names = also_removed
+                .iter()
+                .take(SHOWN)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if also_removed.len() > SHOWN {
+                names.push_str(&format!(" and {} more", also_removed.len() - SHOWN));
+            }
+            format!("✓ Deleted {repo}:{tag} — also removed: {names}")
+        } else if complete {
+            format!("✓ Deleted {repo}:{tag}")
+        } else {
+            format!(
+                "✓ Deleted {repo}:{tag} ({}); list refreshed",
+                short_digest(digest)
+            )
+        };
+
+        self.start_tags_load(repo.to_owned());
+        self.pending_tag_select = neighbour;
+        self.set_status(status);
     }
 
     pub fn on_delete_error(&mut self, msg: String) {
@@ -1948,16 +2129,52 @@ impl App {
         };
     }
 
-    pub fn start_delete(&mut self) {
-        if self.focus == Focus::Tags
-            && let Some(tag) = self.selected_tag().map(str::to_owned)
-            && let Some(repo) = self.current_repo.clone()
+    /// Open the delete dialog for the selected tag and return what the event
+    /// loop must look up to fill it in (its digest, and its siblings).
+    pub fn start_delete(&mut self) -> Option<DeleteLookupRequest> {
+        if self.focus != Focus::Tags {
+            return None;
+        }
+        let tag = self.selected_tag()?.to_owned();
+        let repo = self.current_repo.clone()?;
+        let others: Vec<String> = self
+            .tags_all
+            .iter()
+            .filter(|t| **t != tag)
+            .cloned()
+            .collect();
+        let total = others.len();
+        self.modal = Modal::DeleteConfirm(DeleteConfirm {
+            repo: repo.clone(),
+            tag: tag.clone(),
+            digest: None,
+            lookup: DeleteLookup::Pending,
+        });
+        Some(DeleteLookupRequest {
+            repo,
+            tag,
+            // The cap is on the loaded list, as the dialog promises.
+            others: (self.tags_all.len() <= SIBLING_LOOKUP_LIMIT).then_some(others),
+            total,
+            more_unloaded: self.tags_has_more,
+        })
+    }
+
+    /// Fill in the delete dialog once the lookup returns — but only if that
+    /// dialog is still open for the same tag (it may have been cancelled).
+    pub fn on_delete_lookup(
+        &mut self,
+        repo: &str,
+        tag: &str,
+        digest: Option<String>,
+        lookup: DeleteLookup,
+    ) {
+        if let Modal::DeleteConfirm(m) = &mut self.modal
+            && m.repo == repo
+            && m.tag == tag
         {
-            let msg = format!("Delete '{repo}:{tag}'?");
-            self.modal = Modal::Confirm {
-                message: msg,
-                on_confirm: ConfirmAction::DeleteManifest { repo, tag },
-            };
+            m.digest = digest;
+            m.lookup = lookup;
         }
     }
 
@@ -2267,6 +2484,192 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // -----------------------------------------------------------------------
+    // Delete dialog with sibling check (issue #163)
+    // -----------------------------------------------------------------------
+
+    fn dialog(lookup: DeleteLookup) -> DeleteConfirm {
+        DeleteConfirm {
+            repo: "charts/demo".to_owned(),
+            tag: "0.2.0-retag".to_owned(),
+            digest: Some("sha256:4fb2e35102ba3faf23ae8ebd".to_owned()),
+            lookup,
+        }
+    }
+
+    fn report(siblings: &[&str], unchecked: usize, more_unloaded: bool) -> SiblingReport {
+        SiblingReport {
+            siblings: siblings.iter().map(|s| (*s).to_owned()).collect(),
+            unchecked,
+            more_unloaded,
+        }
+    }
+
+    fn text(d: &DeleteConfirm) -> String {
+        d.message_lines().join("\n")
+    }
+
+    /// The #159 finding: deleting `0.2.0-retag` silently took `0.2.0` too.
+    #[test]
+    fn dialog_names_the_sibling_that_will_also_be_deleted() {
+        let d = dialog(DeleteLookup::Done(report(&["0.2.0"], 0, false)));
+        let t = text(&d);
+        assert!(t.contains("Delete 'charts/demo:0.2.0-retag'?"), "{t}");
+        assert!(t.contains("Manifest sha256:4fb2e35102b"), "{t}");
+        assert!(
+            t.contains("Also removes 1 other tag pointing at the same manifest"),
+            "{t}"
+        );
+        assert!(t.contains("  0.2.0"), "{t}");
+        assert!(t.contains("[y] Delete"), "{t}");
+        assert!(d.can_confirm());
+    }
+
+    #[test]
+    fn dialog_says_none_only_when_every_tag_was_checked() {
+        let complete = text(&dialog(DeleteLookup::Done(report(&[], 0, false))));
+        assert!(
+            complete.contains("No other tag points at this manifest."),
+            "{complete}"
+        );
+
+        let partial = text(&dialog(DeleteLookup::Done(report(&[], 2, true))));
+        assert!(!partial.contains("No other tag points"), "{partial}");
+        assert!(partial.contains("No other checked tag points"), "{partial}");
+        assert!(partial.contains("Could not check 2 tags."), "{partial}");
+        assert!(
+            partial.contains("More tags exist that were not loaded — not checked."),
+            "{partial}"
+        );
+    }
+
+    #[test]
+    fn dialog_caps_a_long_sibling_list() {
+        let many: Vec<String> = (0..13).map(|i| format!("t{i:02}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let t = text(&dialog(DeleteLookup::Done(report(&refs, 0, false))));
+        assert!(t.contains("Also removes 13 other tags"), "{t}");
+        assert!(t.contains("t09") && !t.contains("t10,"), "{t}");
+        assert!(t.contains("…and 3 more"), "{t}");
+    }
+
+    #[test]
+    fn dialog_warns_generically_when_the_check_is_skipped() {
+        let d = dialog(DeleteLookup::Skipped { total: 512 });
+        let t = text(&d);
+        assert!(t.contains("512 other tags loaded"), "{t}");
+        assert!(
+            t.contains("Every tag pointing at this manifest will be deleted too."),
+            "{t}"
+        );
+        assert!(d.can_confirm());
+    }
+
+    #[test]
+    fn dialog_cannot_confirm_while_pending_or_after_a_failed_resolve() {
+        let pending = DeleteConfirm {
+            digest: None,
+            ..dialog(DeleteLookup::Pending)
+        };
+        assert!(!pending.can_confirm());
+        assert!(text(&pending).contains("Checking other tags"));
+        assert!(!text(&pending).contains("[y]"));
+
+        let failed = DeleteConfirm {
+            digest: None,
+            ..dialog(DeleteLookup::Failed("unauthorized".to_owned()))
+        };
+        assert!(!failed.can_confirm());
+        assert!(text(&failed).contains("Nothing can be deleted safely."));
+    }
+
+    #[test]
+    fn start_delete_skips_the_lookup_above_the_limit_and_flags_unloaded_pages() {
+        let names: Vec<String> = (0..=SIBLING_LOOKUP_LIMIT)
+            .map(|i| format!("t{i}"))
+            .collect();
+        let mut app = make_app_with_tags("r", names.iter().map(String::as_str).collect());
+        app.focus = Focus::Tags;
+        let req = app.start_delete().unwrap();
+        assert!(req.others.is_none());
+        assert_eq!(req.total, SIBLING_LOOKUP_LIMIT);
+
+        let mut small = make_app_with_tags("r", vec!["a", "b"]);
+        small.tags_has_more = true;
+        small.focus = Focus::Tags;
+        let req = small.start_delete().unwrap();
+        assert_eq!(req.others.as_ref().map(Vec::len), Some(1));
+        assert!(req.more_unloaded);
+    }
+
+    #[test]
+    fn start_delete_does_nothing_outside_the_tags_pane() {
+        let mut app = make_app_with_tags("r", vec!["a"]);
+        app.focus = Focus::Repos;
+        assert!(app.start_delete().is_none());
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    /// A lookup that returns after the dialog was cancelled, or for another
+    /// tag, must not resurrect or corrupt anything.
+    #[test]
+    fn a_stale_lookup_is_ignored() {
+        let mut app = make_app_with_tags("r", vec!["a", "b"]);
+        app.focus = Focus::Tags;
+        app.start_delete();
+        app.on_delete_lookup(
+            "r",
+            "other",
+            Some("sha256:x".into()),
+            DeleteLookup::Skipped { total: 1 },
+        );
+        assert!(matches!(&app.modal, Modal::DeleteConfirm(m) if m.lookup == DeleteLookup::Pending));
+
+        app.modal = Modal::None;
+        app.on_delete_lookup(
+            "r",
+            "b",
+            Some("sha256:x".into()),
+            DeleteLookup::Skipped { total: 1 },
+        );
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    /// After a delete the list is reloaded; selection lands on the deleted
+    /// tag's nearest surviving neighbour, not back at the top.
+    #[test]
+    fn after_delete_the_reloaded_list_selects_the_nearest_survivor() {
+        let mut app = make_app_with_tags("r", vec!["3.0.0", "2.0.0", "1.0.0", "0.5.0"]);
+        app.focus = Focus::Tags;
+        app.tags_state.select(Some(1));
+        assert_eq!(app.selected_tag(), Some("2.0.0"));
+
+        app.on_delete_success("r", "2.0.0", "sha256:abc", &["1.0.0".to_owned()], true);
+        assert!(app.tags.is_empty(), "list is reloading");
+        assert!(
+            app.status_text()
+                .is_some_and(|s| s.contains("also removed: 1.0.0"))
+        );
+
+        app.on_tags_page("r".to_owned(), vec!["3.0.0".into(), "0.5.0".into()], false);
+        assert_eq!(app.selected_tag(), Some("0.5.0"));
+    }
+
+    #[test]
+    fn after_delete_status_admits_an_incomplete_check() {
+        let mut app = make_app_with_tags("r", vec!["a", "b"]);
+        app.on_delete_success("r", "a", "sha256:4fb2e35102ba3faf", &[], false);
+        let s = app.status_text().unwrap_or_default().to_owned();
+        assert!(
+            s.contains("sha256:4fb2e35102b") && s.contains("list refreshed"),
+            "{s}"
+        );
+
+        let mut app = make_app_with_tags("r", vec!["a", "b"]);
+        app.on_delete_success("r", "a", "sha256:x", &[], true);
+        assert_eq!(app.status_text(), Some("✓ Deleted r:a"));
     }
 
     fn make_app_with_tags(repo: &str, tags: Vec<&str>) -> App {
@@ -2685,17 +3088,16 @@ mod tests {
     }
 
     #[test]
-    fn start_delete_sets_confirm_modal() {
+    fn start_delete_opens_a_pending_delete_dialog() {
         let mut app = make_app_with_tags("myrepo", vec!["v1"]);
         app.focus = Focus::Tags;
-        app.start_delete();
+        let req = app.start_delete().expect("a lookup request");
+        assert_eq!(req.repo, "myrepo");
+        assert_eq!(req.tag, "v1");
         assert!(matches!(
-            app.modal,
-            Modal::Confirm {
-                ref on_confirm,
-                ..
-            } if matches!(on_confirm, ConfirmAction::DeleteManifest { repo, tag }
-                if repo == "myrepo" && tag == "v1")
+            &app.modal,
+            Modal::DeleteConfirm(m)
+                if m.repo == "myrepo" && m.tag == "v1" && m.lookup == DeleteLookup::Pending
         ));
     }
 
@@ -3716,10 +4118,10 @@ mod tests {
         assert_eq!(
             help_context_for(
                 &Modal::Confirm {
-                    message: "Delete?".to_owned(),
-                    on_confirm: ConfirmAction::DeleteManifest {
+                    message: "Prune?".to_owned(),
+                    on_confirm: ConfirmAction::PruneDigestTags {
                         repo: "r".to_owned(),
-                        tag: "t".to_owned(),
+                        tags: Vec::new(),
                     },
                 },
                 Focus::Repos

@@ -11,7 +11,8 @@ use ratatui::{
 use crate::ops::diff::DiffStatus;
 
 use super::app::{
-    App, Focus, HelpContext, InspectModal, LoadState, Modal, PickerChoice, SPINNER, picker_choices,
+    App, DeleteConfirm, Focus, HelpContext, InspectModal, LoadState, Modal, PickerChoice, SPINNER,
+    picker_choices,
 };
 use super::detail;
 use super::input::{InputState, cursor_spans, input_scroll_skip};
@@ -53,6 +54,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match &app.modal {
         Modal::Confirm { message, .. } => draw_confirm_modal(frame, message.clone(), area),
+        Modal::DeleteConfirm(dialog) => draw_delete_confirm_modal(frame, dialog, area),
         Modal::Input {
             prompt,
             input,
@@ -429,6 +431,23 @@ fn draw_keybindings(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled("Enter", Style::default().fg(Color::Cyan)),
             Span::raw(" confirm "),
         ])
+    } else if let Some(status) = app.status_text() {
+        // An operation's outcome replaces the hints for its lifetime. It used
+        // to render only inside the Details pane, and only when no detail was
+        // loaded, so most outcomes — a delete taking sibling tags with it, a
+        // delete refused because the tag moved, a finished copy — were never
+        // seen (#163).
+        let colour = if status.starts_with('✗') || status.contains("nothing deleted") {
+            Color::LightRed
+        } else if status.starts_with('✓') {
+            Color::LightGreen
+        } else {
+            Color::Yellow
+        };
+        Line::from(Span::styled(
+            format!(" {status}"),
+            Style::default().fg(colour).add_modifier(Modifier::BOLD),
+        ))
     } else if app.focus == Focus::Detail {
         Line::from(vec![
             Span::styled(" Tab", Style::default().fg(Color::Cyan)),
@@ -507,6 +526,25 @@ fn draw_confirm_modal(frame: &mut Frame, message: String, area: Rect) {
 
     let text = format!("{message}\n\n[y] Confirm  [n/Esc] Cancel");
     let p = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
+
+    frame.render_widget(p, modal_area);
+}
+
+fn draw_delete_confirm_modal(frame: &mut Frame, dialog: &DeleteConfirm, area: Rect) {
+    let lines = dialog.message_lines();
+    // Grow with the content (borders, lines and wrap headroom), within the usual popup bounds.
+    let modal_area = popup_rect(area, 60, 60, (lines.len() as u16).saturating_add(6));
+
+    frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .title(" Delete ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Red));
+
+    let p = Paragraph::new(lines.join("\n"))
+        .block(block)
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(p, modal_area);
 }
@@ -1668,12 +1706,28 @@ mod tests {
     fn all_popup_modals_render_without_panic_on_a_small_terminal() {
         for modal in [
             Modal::Confirm {
-                message: "Delete this?".to_owned(),
-                on_confirm: ConfirmAction::DeleteManifest {
+                message: "Prune this?".to_owned(),
+                on_confirm: ConfirmAction::PruneDigestTags {
                     repo: "r".to_owned(),
-                    tag: "t".to_owned(),
+                    tags: Vec::new(),
                 },
             },
+            Modal::DeleteConfirm(super::super::app::DeleteConfirm {
+                repo: "r".to_owned(),
+                tag: "t".to_owned(),
+                digest: None,
+                lookup: super::super::app::DeleteLookup::Pending,
+            }),
+            Modal::DeleteConfirm(super::super::app::DeleteConfirm {
+                repo: "charts/demo".to_owned(),
+                tag: "0.2.0-retag".to_owned(),
+                digest: Some(format!("sha256:{}", "a".repeat(64))),
+                lookup: super::super::app::DeleteLookup::Done(crate::ops::delete::SiblingReport {
+                    siblings: (0..40).map(|i| format!("tag-{i}")).collect(),
+                    unchecked: 3,
+                    more_unloaded: true,
+                }),
+            }),
             Modal::Input {
                 prompt: "Name:".to_owned(),
                 input: InputState::default(),
@@ -2003,5 +2057,35 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("Open a repository by name"), "{text}");
+    }
+
+    /// An operation's outcome is visible in the footer even while a tag's
+    /// details are on screen — before #163 it only showed with no detail.
+    #[test]
+    fn status_replaces_the_key_hints_in_the_footer() {
+        let mut app = make_app();
+        app.set_status("✓ Deleted r:a — also removed: b");
+        let screen = render_to_string(&mut app, 120, 20);
+        let footer = screen.lines().last().unwrap_or_default();
+        assert!(footer.contains("also removed: b"), "{footer}");
+        assert!(!footer.contains("quit"), "{footer}");
+    }
+
+    #[test]
+    fn typing_a_filter_keeps_its_hints_over_a_status() {
+        let mut app = make_app();
+        app.set_status("✓ Copied");
+        app.filter_mode = Some(Focus::Repos);
+        let screen = render_to_string(&mut app, 120, 20);
+        let footer = screen.lines().last().unwrap_or_default();
+        assert!(footer.contains("Typing filter"), "{footer}");
+    }
+
+    #[test]
+    fn without_a_status_the_footer_shows_key_hints() {
+        let mut app = make_app();
+        let screen = render_to_string(&mut app, 160, 20);
+        let footer = screen.lines().last().unwrap_or_default();
+        assert!(footer.contains("quit"), "{footer}");
     }
 }

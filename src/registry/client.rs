@@ -289,6 +289,34 @@ impl RegistryClient {
     }
 
     /// `GET /v2/<name>/manifests/<reference>` — fetch a manifest by tag or digest.
+    /// `HEAD /v2/<name>/manifests/<reference>` — the manifest's digest
+    /// without its body.
+    ///
+    /// Used to find which tags share a manifest before a delete. Falls back to
+    /// a GET (whose digest is computed if need be) when the registry sends no
+    /// `Docker-Content-Digest` on HEAD.
+    pub async fn head_manifest(&self, repo: &str, reference: &str) -> Result<String> {
+        let path = format!("/v2/{repo}/manifests/{reference}");
+        let url = self.url(&path)?;
+        let resp = self
+            .send(
+                self.http
+                    .head(url.clone())
+                    .header(reqwest::header::ACCEPT, MANIFEST_ACCEPT),
+            )
+            .await?;
+        require_success(&resp, &url)?;
+        match resp
+            .headers()
+            .get("docker-content-digest")
+            .and_then(|v| v.to_str().ok())
+            .filter(|d| !d.is_empty())
+        {
+            Some(d) => Ok(d.to_owned()),
+            None => Ok(self.get_manifest(repo, reference).await?.digest),
+        }
+    }
+
     pub async fn get_manifest(&self, repo: &str, reference: &str) -> Result<ManifestResponse> {
         let path = format!("/v2/{repo}/manifests/{reference}");
         let url = self.url(&path)?;
@@ -309,14 +337,20 @@ impl RegistryClient {
             .unwrap_or("")
             .to_owned();
 
-        let digest = resp
+        let header_digest = resp
             .headers()
             .get("docker-content-digest")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_owned();
+            .map(str::to_owned);
 
         let raw = resp.bytes().await?.to_vec();
+        // A registry may omit the header. The digest is defined as the sha256
+        // of the exact bytes served, so computing it gives the same value —
+        // and an empty digest would otherwise turn a delete into
+        // `DELETE …/manifests/` (#163).
+        let digest = header_digest
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| manifest_digest(&raw));
 
         let manifest = parse_manifest(&content_type, &raw)?;
 
@@ -540,6 +574,18 @@ fn same_origin(request: &Url, base: &Url) -> bool {
     request.scheme() == base.scheme() && same_host_and_port(request, base)
 }
 
+/// `sha256:<hex>` of a manifest's exact bytes — its content digest.
+pub fn manifest_digest(raw: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = Sha256::digest(raw);
+    let mut out = String::with_capacity(7 + 64);
+    out.push_str("sha256:");
+    for byte in hash {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
 fn require_success(resp: &Response, url: &Url) -> Result<()> {
     match resp.status() {
         s if s.is_success() => Ok(()),
@@ -733,5 +779,19 @@ mod tests {
                 "same_origin({a}, {b}) must agree with reqwest's redirect check"
             );
         }
+    }
+
+    /// The digest of a manifest is the sha256 of its exact bytes; this is
+    /// the fallback when a registry omits `Docker-Content-Digest`.
+    #[test]
+    fn manifest_digest_is_sha256_of_the_bytes() {
+        assert_eq!(
+            manifest_digest(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            manifest_digest(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 }
