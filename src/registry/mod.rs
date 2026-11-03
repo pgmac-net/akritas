@@ -22,5 +22,5 @@ pub use search::search_dockerhub;
 pub use types::{
     ArtifactoryRepo, BlobInfo, Catalog, HelmChartConfig, ImageConfigBlob, ImageManifest, Manifest,
     ManifestDescriptor, ManifestIndex, ManifestResponse, Platform, TagList, UploadLocation,
-    media_types,
+    media_types, valid_repository_name,
 };

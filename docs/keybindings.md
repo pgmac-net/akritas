@@ -39,7 +39,7 @@ including a picker's typed filter text and highlighted row. See
 
 | Context | Reachable from | Sections shown |
 |---|---|---|
-| `Normal(Repos)` | Repos panel focused, no modal | Navigation, Filter, Repository operations, Registry, General |
+| `Normal(Repos)` | Repos panel focused, no modal | Navigation (incl. `o` open by name), Filter, Repository operations, Registry, General |
 | `Normal(Tags)` | Tags panel focused, no modal | Navigation, Filter, Image operations, Tags panel, General |
 | `Normal(Detail)` | Detail panel focused, no modal | Navigation, Image operations (just `c`), General |
 | `Inspect` | JSON viewer open, not searching | Full viewer keymap, including close (`Esc`/`q`) and search (`Esc`/`Enter`) |
@@ -99,3 +99,12 @@ noise once most contexts don't need one.
   see [`inspect-tree-navigation.md`](inspect-tree-navigation.md).
 - Inspect viewer: `o` expands everything inside the current element, the opposite of
   `c` (issue #136).
+
+## `o` — open a repository by name
+
+`o` opens the same browse-by-name prompt that a failed catalog used to be the
+only route to, from normal mode in any panel and on any registry type (#161).
+With configured `repositories`, a failed discovery no longer opens that prompt
+by itself, so `o` is what keeps every unlisted repository reachable. It is also
+the quick way to jump straight to one repository in a large catalog. Inside a
+filter, a text prompt or a picker, `o` is an ordinary letter.

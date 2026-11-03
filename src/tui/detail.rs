@@ -45,15 +45,7 @@ fn valid_oci_ref(host: &str, repo: &str, tag: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
     // OCI distribution spec: lowercase path components, `/`-separated.
-    let repo_ok = !repo.is_empty()
-        && repo.split('/').all(|part| {
-            !part.is_empty()
-                && part != ".."
-                && part != "."
-                && part.chars().all(|c| {
-                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
-                })
-        });
+    let repo_ok = crate::registry::valid_repository_name(repo);
     // OCI tag grammar: [A-Za-z0-9_][A-Za-z0-9._-]{0,127}
     let mut tag_chars = tag.chars();
     let tag_ok = tag.len() <= 128

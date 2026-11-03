@@ -19,19 +19,20 @@ do), which is why this is detected per tag and not configured per profile.
 ## Configuration
 
 `oci://8gears.container-registry.com/library/n8n` — a Harbor registry. Harbor
-refuses `/v2/_catalog` to anonymous users, so the repo list is empty and the
-TUI offers *browse by name* straight away:
+refuses `/v2/_catalog` to anonymous users, so name the charts you want with
+`repositories` ([#161](https://github.com/pgmac-net/docker-registry-walk/issues/161)).
+They are listed straight away, marked `★`, and the refused catalog is a status
+message instead of a prompt:
 
 ```toml
 [[registry]]
 name = "8gears"
 url = "https://8gears.container-registry.com"
+repositories = ["library/n8n"]
 ```
 
-Then type `library/n8n` at the prompt.
-
-`oci://ghcr.io/actions/actions-runner-controller-charts/` — GHCR. Anonymously,
-type the full chart path at the browse-by-name prompt:
+`oci://ghcr.io/actions/actions-runner-controller-charts/` — GHCR. Anonymously
+the packages API lists nothing, so seed the charts under that prefix:
 
 ```toml
 [[registry]]
@@ -39,12 +40,15 @@ name = "ghcr-actions"
 url = "https://ghcr.io"
 type = "ghcr"
 owner = "actions"
+repositories = [
+  "actions/actions-runner-controller-charts/gha-runner-scale-set-controller",
+  "actions/actions-runner-controller-charts/gha-runner-scale-set",
+]
 ```
 
-```
-actions/actions-runner-controller-charts/gha-runner-scale-set-controller
-actions/actions-runner-controller-charts/gha-runner-scale-set
-```
+Without `repositories`, the browse-by-name prompt still opens when discovery
+fails; type the full chart path there. Either way, `o` opens any other chart by
+name.
 
 With a personal access token that has `read:packages` (`--token` or `$CR_PAT`)
 and `owner = "actions"`, the GHCR picker lists the owner's packages including
@@ -131,5 +135,3 @@ order" in the README.
 
 - Delete removing sibling tags silently, prune never matching, and retag vs
   `Chart.yaml` `version` (filed as separate issues from #159).
-- A `repositories = [...]` seed list for registries with no browsable catalog,
-  so a known set of charts is one keystroke away.

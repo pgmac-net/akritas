@@ -22,6 +22,26 @@ pub const MANIFEST_ACCEPT: &str = concat!(
     "application/vnd.docker.distribution.manifest.list.v2+json",
 );
 
+/// True when `repo` is a valid OCI repository name: one or more `/`-separated
+/// path components, each non-empty, made of lowercase ASCII letters, digits,
+/// `.`, `_` and `-`, and never `.` or `..`.
+///
+/// The single rule for every repository name that comes from outside —
+/// config seeds (`repositories = [...]`) and anything offered for the clipboard
+/// — so the two cannot drift apart. Kept to an allow-list: nothing that could
+/// mean something to a shell or a URL path gets through.
+pub fn valid_repository_name(repo: &str) -> bool {
+    !repo.is_empty()
+        && repo.split('/').all(|part| {
+            !part.is_empty()
+                && part != ".."
+                && part != "."
+                && part.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                })
+        })
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Catalog {
     #[serde(default)]
@@ -188,5 +208,22 @@ mod tests {
         assert_eq!(repos[0].repo_type, "LOCAL");
         assert_eq!(repos[0].package_type, "Docker");
         assert_eq!(repos[1].key, "docker-remote");
+    }
+
+    #[test]
+    fn valid_repository_name_follows_the_oci_grammar() {
+        for ok in [
+            "n8n",
+            "library/n8n",
+            "actions/arc-charts/gha-runner-scale-set",
+            "a.b_c-d/e",
+        ] {
+            assert!(valid_repository_name(ok), "{ok}");
+        }
+        for bad in [
+            "", "A/b", "a//b", "/a", "a/", "./a", "a/..", "a b", "a;b", "a:b", "$(x)",
+        ] {
+            assert!(!valid_repository_name(bad), "{bad}");
+        }
     }
 }

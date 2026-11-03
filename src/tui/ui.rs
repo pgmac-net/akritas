@@ -294,9 +294,24 @@ fn draw_repos(frame: &mut Frame, app: &mut App, area: Rect) {
                 .style(ratatui::style::Style::default().fg(ratatui::style::Color::Red)),
         ]
     } else {
+        // Configured repositories (`repositories = [...]`) get a dim star so
+        // it is clear why they are listed even when discovery failed. Other
+        // rows are indented to match, but only when there are seeds at all.
+        let any_seeded = app.repos.iter().any(|r| app.is_seeded(r));
         app.repos
             .iter()
-            .map(|r| ListItem::new(r.as_str()))
+            .map(|r| {
+                if !any_seeded {
+                    ListItem::new(r.as_str())
+                } else if app.is_seeded(r) {
+                    ListItem::new(Line::from(vec![
+                        Span::styled("★ ", ratatui::style::Style::default().fg(Color::DarkGray)),
+                        Span::raw(r.clone()),
+                    ]))
+                } else {
+                    ListItem::new(format!("  {r}"))
+                }
+            })
             .collect()
     };
 
@@ -1133,6 +1148,7 @@ fn help_lines_normal(focus: Focus) -> Vec<Line<'static>> {
     });
     lines.push(help_kv("Tab / →", "Next panel"));
     lines.push(help_kv("Shift-Tab / ←", "Previous panel"));
+    lines.push(help_kv("o", "Open a repository by name"));
     match focus {
         Focus::Repos => lines.push(help_kv("Enter", "Move to Tags (if tags are loaded)")),
         Focus::Tags => lines.push(help_kv("Enter", "Inspect the selected tag")),
@@ -1946,5 +1962,46 @@ mod tests {
         assert_eq!(title_for(&err, false, ""), " Repositories ✗ ");
         // Typing with an empty query still shows the prompt.
         assert_eq!(title_for(&LoadState::Loading, true, ""), " Repos ⠹ /  ");
+    }
+
+    /// Seeded rows carry the star; discovered rows are indented to match.
+    #[test]
+    fn seeded_repositories_are_marked() {
+        let profile = RegistryProfile {
+            name: "h".to_owned(),
+            url: Some("https://h.example.com".to_owned()),
+            registry_type: RegistryType::Standard,
+            repositories: vec!["library/n8n".to_owned()],
+            ..Default::default()
+        };
+        let mut app = App::new(vec![profile], 0);
+        app.on_repos_page(vec!["other/redis".to_owned()], false);
+        let screen = render_to_string(&mut app, 100, 20);
+        assert!(screen.contains("★ library/n8n"), "{screen}");
+        assert!(screen.contains("  other/redis"), "{screen}");
+        assert!(!screen.contains("★ other/redis"), "{screen}");
+    }
+
+    #[test]
+    fn unseeded_profiles_render_repositories_unchanged() {
+        let mut app = make_app();
+        app.on_repos_page(vec!["other/redis".to_owned()], false);
+        let screen = render_to_string(&mut app, 100, 20);
+        assert!(!screen.contains('★'), "{screen}");
+    }
+
+    #[test]
+    fn help_lists_the_open_repository_key() {
+        let text: String = help_lines_normal(Focus::Repos)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Open a repository by name"), "{text}");
     }
 }
