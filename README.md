@@ -18,6 +18,7 @@ An interactive TUI browser for Docker registries, written in Rust.
 - Multi-registry support with in-app switching (`R`)
 - JFrog Artifactory support: browse the Docker repo-keys hosted on an Artifactory instance via a picker, authenticating with either HTTP Basic (username + API key/identity token) or a JFrog access token sent as `Authorization: Bearer` — the same way the Terraform `jfrog/artifactory` provider authenticates
 - GitHub Container Registry support: GHCR serves no `/v2/_catalog`, so packages are listed from the GitHub packages API (yours, or any user's or organisation's) and offered in a filterable picker
+- Helm chart OCI registries: charts pushed with `helm push` are recognised per tag and shown with chart name, version, app version and description; `c` copies a `helm pull oci://… --version …` command — see [docs/helm-oci-charts.md](docs/helm-oci-charts.md)
 - Per-registry credentials stored in the OS keychain — never in the config file
 - Live filter and sort within repos/tags panels
 - In-app keybindings reference (`?`)
@@ -115,7 +116,17 @@ region = "ap-southeast-2"
 [[registry]]
 name = "ecr-public"
 type = "ecr-public"
+
+# Helm charts in OCI registries need no special entry — a chart is just a
+# repository in an ordinary registry, recognised per tag. Harbor refuses the
+# repo list to anonymous users, so a browse-by-name prompt opens: type
+# `library/n8n` (from oci://8gears.container-registry.com/library/n8n).
+[[registry]]
+name = "8gears"
+url = "https://8gears.container-registry.com"
 ```
+
+Helm chart OCI registries: see [docs/helm-oci-charts.md](docs/helm-oci-charts.md).
 
 Per-profile keys:
 
@@ -287,7 +298,7 @@ entire document. Search auto-expands any folds hiding a match.
 
 - Docker Registry API v2 (`/v2/` endpoint)
 - For **delete / prune**: `REGISTRY_STORAGE_DELETE_ENABLED=true`
-- Auth: anonymous, HTTP Basic, Bearer token (automatic token exchange with per-endpoint scope retry), or a static access token sent as `Authorization: Bearer`
+- Auth: anonymous (including the anonymous Bearer token exchange public Harbor/Quay/GHCR repositories use), HTTP Basic, Bearer token (automatic token exchange with per-endpoint scope retry), or a static access token sent as `Authorization: Bearer`
 - HTTPS strongly recommended; plain HTTP supported for local/internal registries
 
 ## License

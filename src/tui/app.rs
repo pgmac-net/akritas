@@ -1807,7 +1807,7 @@ impl App {
     // ------------------------------------------------------------------
 
     pub fn copy_pull_url(&mut self) {
-        let Some(pull_url) = self.detail.as_ref().map(|d| d.pull_url.clone()) else {
+        let Some(pull_url) = self.detail.as_ref().map(|d| d.copy_text().to_owned()) else {
             return;
         };
         match clipboard::copy_to_clipboard(&pull_url) {

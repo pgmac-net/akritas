@@ -20,7 +20,7 @@ pub use error::{RegistryError, Result};
 pub use ghcr::{PackageList, list_owners, list_packages};
 pub use search::search_dockerhub;
 pub use types::{
-    ArtifactoryRepo, BlobInfo, Catalog, ImageConfigBlob, ImageManifest, Manifest,
+    ArtifactoryRepo, BlobInfo, Catalog, HelmChartConfig, ImageConfigBlob, ImageManifest, Manifest,
     ManifestDescriptor, ManifestIndex, ManifestResponse, Platform, TagList, UploadLocation,
     media_types,
 };
