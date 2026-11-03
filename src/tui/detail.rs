@@ -23,7 +23,45 @@ pub struct HelmInfo {
     pub description: Option<String>,
     /// `helm pull oci://<host>/<repo> --version <tag>` — the `--version` form
     /// is the unambiguous one; tag-in-reference support varies by Helm version.
-    pub pull_command: String,
+    ///
+    /// `None` when host, repository or tag fails OCI name validation: all
+    /// three are registry- or user-supplied and this string is meant to be
+    /// pasted into a shell, so an unvalidated `; rm -rf ~` in a tag would
+    /// become a command. No command is offered rather than a quoted guess.
+    pub pull_command: Option<String>,
+}
+
+/// Build the `helm pull` command, or `None` if any part is not a valid OCI
+/// name. Allow-lists, so nothing shell-significant can get through.
+fn helm_pull_command(host: &str, repo: &str, tag: &str) -> Option<String> {
+    let host_ok = !host.is_empty()
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'));
+    // OCI distribution spec: lowercase path components, `/`-separated.
+    let repo_ok = !repo.is_empty()
+        && repo.split('/').all(|part| {
+            !part.is_empty()
+                && part != ".."
+                && part != "."
+                && part.chars().all(|c| {
+                    c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-')
+                })
+        });
+    // OCI tag grammar: [A-Za-z0-9_][A-Za-z0-9._-]{0,127}
+    let mut tag_chars = tag.chars();
+    let tag_ok = tag.len() <= 128
+        && tag_chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        && tag_chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    (host_ok && repo_ok && tag_ok).then(|| format!("helm pull oci://{host}/{repo} --version {tag}"))
+}
+
+/// Registry-supplied text is rendered into the terminal: strip control
+/// characters so a chart description cannot carry escape sequences.
+fn clean(text: String) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +86,8 @@ impl ImageDetail {
     pub fn copy_text(&self) -> &str {
         self.helm
             .as_ref()
-            .map_or(self.pull_url.as_str(), |h| h.pull_command.as_str())
+            .and_then(|h| h.pull_command.as_deref())
+            .unwrap_or(self.pull_url.as_str())
     }
 
     pub fn from_manifest_and_config(
@@ -81,11 +120,11 @@ impl ImageDetail {
                 let chart = chart.cloned().unwrap_or_default();
                 Self {
                     helm: Some(HelmInfo {
-                        name: chart.name,
-                        version: chart.version,
-                        app_version: chart.app_version,
-                        description: chart.description,
-                        pull_command: format!("helm pull oci://{host}/{repo} --version {tag}"),
+                        name: chart.name.map(clean),
+                        version: chart.version.map(clean),
+                        app_version: chart.app_version.map(clean),
+                        description: chart.description.map(clean),
+                        pull_command: helm_pull_command(host, repo, tag),
                     }),
                     digest: resp.digest.clone(),
                     content_type: resp.content_type.clone(),
@@ -215,7 +254,15 @@ pub fn render_lines(detail: &ImageDetail) -> Vec<Line<'static>> {
         } else {
             "Pull URL"
         },
-        Span::styled(detail.copy_text().to_owned(), URL_STYLE),
+        Span::styled(
+            match &detail.helm {
+                Some(h) => h.pull_command.clone().unwrap_or_else(|| {
+                    "unavailable (name or tag is not a valid OCI reference)".to_owned()
+                }),
+                None => detail.pull_url.clone(),
+            },
+            URL_STYLE,
+        ),
     );
 
     let digest_short = if detail.digest.len() > 19 {
@@ -459,5 +506,62 @@ mod tests {
         assert_eq!(arc.app_version.as_deref(), Some("0.10.1"));
         let empty: HelmChartConfig = serde_json::from_str("{}").unwrap();
         assert!(empty.name.is_none() && empty.version.is_none());
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[test]
+    fn pull_command_accepts_real_references() {
+        assert_eq!(
+            helm_pull_command(
+                "ghcr.io",
+                "actions/arc-charts/gha-runner-scale-set",
+                "0.10.1-rc.1"
+            )
+            .as_deref(),
+            Some(
+                "helm pull oci://ghcr.io/actions/arc-charts/gha-runner-scale-set --version 0.10.1-rc.1"
+            )
+        );
+        assert!(helm_pull_command("localhost:5000", "a/b", "_x").is_some());
+    }
+
+    /// Tags and repos come from the registry (or the user's typing) and the
+    /// command is pasted into a shell: anything shell-significant must yield
+    /// no command at all.
+    #[test]
+    fn pull_command_refuses_shell_metacharacters() {
+        for tag in [
+            "1.0;rm -rf ~",
+            "$(id)",
+            "a b",
+            "`x`",
+            "1.0\n",
+            "-x",
+            "",
+            "a|b",
+            "a&b",
+        ] {
+            assert!(
+                helm_pull_command("ghcr.io", "a/b", tag).is_none(),
+                "{tag:?}"
+            );
+        }
+        for repo in ["a/b;x", "A/B", "a/../b", "a//b", "", "$(x)/y", "a b"] {
+            assert!(
+                helm_pull_command("ghcr.io", repo, "1.0").is_none(),
+                "{repo:?}"
+            );
+        }
+        assert!(helm_pull_command("h;x", "a/b", "1.0").is_none());
+        assert!(helm_pull_command("ghcr.io", "a/b", &"v".repeat(129)).is_none());
+    }
+
+    #[test]
+    fn clean_strips_control_characters() {
+        assert_eq!(clean("a\u{1b}[31mb\n".to_owned()), "a[31mb");
     }
 }
