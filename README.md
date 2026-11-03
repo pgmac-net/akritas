@@ -20,7 +20,7 @@ An interactive TUI browser for Docker registries, written in Rust.
 - GitHub Container Registry support: GHCR serves no `/v2/_catalog`, so packages are listed from the GitHub packages API (yours, or any user's or organisation's) and offered in a filterable picker
 - Helm chart OCI registries: charts pushed with `helm push` are recognised per tag and shown with chart name, version, app version and description; `c` copies a `helm pull oci://… --version …` command — see [docs/helm-oci-charts.md](docs/helm-oci-charts.md)
 - Per-registry credentials stored in the OS keychain — never in the config file
-- Live filter and sort within repos/tags panels
+- Live filter and version-aware sort within repos/tags panels: `0.10.0` sorts after `0.2.0`, newest first by default (see "Tag sort order" below)
 - In-app keybindings reference (`?`)
 
 ## Install
@@ -277,7 +277,11 @@ entire document. Search auto-expands any folds hiding a match.
 
 | Key | Action |
 |-----|--------|
-| `s` | Cycle sort order (↑ / ↓ name) |
+| `s` | Toggle tag sort order (↓ / ↑ version) |
+
+#### Tag sort order
+
+Tags that look like a version are ordered by [SemVer](https://semver.org) precedence, newest first by default (`↓ version`); `s` flips it (`↑ version`). A version here is lenient: a leading `v` is ignored, `1.25` reads as `1.25.0`, and `_` is read as `+` (Helm stores `1.2.3+build5` as `1.2.3_build5`). Pre-releases precede their release (`1.0.0-rc.2` < `1.0.0-rc.10` < `1.0.0`). Tags that are not versions (`latest`, `main`, `sha-…`) are listed after the versions in alphabetical order, in both directions. The highlighted tag stays selected when the order changes or more tags arrive.
 
 ### Registry
 

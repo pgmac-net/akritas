@@ -3,6 +3,7 @@ mod detail;
 mod event;
 mod input;
 mod jsonview;
+mod tagsort;
 mod ui;
 
 use std::io;

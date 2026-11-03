@@ -1320,6 +1320,7 @@ dependencies = [
  "ratatui",
  "reqwest",
  "rpassword",
+ "semver",
  "serde",
  "serde_json",
  "tar",

@@ -119,10 +119,17 @@ Copy and export used to crash the TUI on their first progress tick
 (`Sender::blocking_send` called from a tokio worker). That affected container
 images as well as charts and is fixed in #159.
 
+## Tag order
+
+Chart versions sort by SemVer precedence, newest first, so `0.15.1` is at the top
+and `0.10.0` follows `0.9.3` (issue
+[#160](https://github.com/pgmac-net/docker-registry-walk/issues/160)). `s`
+flips the order. Helm's `_` for `+` build metadata is understood. See "Tag sort
+order" in the README.
+
 ## Not covered (follow-ups)
 
 - Delete removing sibling tags silently, prune never matching, and retag vs
   `Chart.yaml` `version` (filed as separate issues from #159).
-- Semver-aware tag sort. Tags sort lexically (`0.10.0` before `0.2.0`).
 - A `repositories = [...]` seed list for registries with no browsable catalog,
   so a known set of charts is one keystroke away.
