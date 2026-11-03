@@ -412,8 +412,8 @@ pub fn help_context_for(modal: &Modal, focus: Focus) -> HelpContext {
         | Modal::EcrRegionPicker { .. } => HelpContext::ChoicePicker,
         Modal::RegistrySelect { .. } => HelpContext::RegistrySelect,
         Modal::LayerDiff(_) => HelpContext::LayerDiff,
-        // Confirm, Input and Help itself have no keybinding context of their
-        // own worth switching to: Confirm/Input already show their keys
+        // DeleteConfirm, Input and Help itself have no keybinding context of
+        // their own worth switching to: DeleteConfirm/Input already show their keys
         // inline, and `?` cannot reach Help from Help. Normal is the sensible
         // fallback for all three, and for `None`.
         _ => HelpContext::Normal(focus),
@@ -423,13 +423,9 @@ pub fn help_context_for(modal: &Modal, focus: Focus) -> HelpContext {
 #[derive(Debug)]
 pub enum Modal {
     None,
-    /// Delete confirmation with the sibling-tag check (#163). Like
-    /// `Confirm`, it shows its own keys inline, so Help falls back to Normal.
+    /// Delete confirmation with the sibling-tag check (#163). It shows its
+    /// own keys inline, so Help falls back to Normal.
     DeleteConfirm(DeleteConfirm),
-    Confirm {
-        message: String,
-        on_confirm: ConfirmAction,
-    },
     Input {
         prompt: String,
         input: InputState,
@@ -599,11 +595,6 @@ pub fn ecr_region_suggestions(profile_region: Option<&str>, current: Option<&str
     );
 
     regions
-}
-
-#[derive(Debug, Clone)]
-pub enum ConfirmAction {
-    PruneDigestTags { repo: String, tags: Vec<String> },
 }
 
 /// Where the pre-delete sibling check has got to (#163).
@@ -4117,17 +4108,16 @@ mod tests {
         );
         assert_eq!(
             help_context_for(
-                &Modal::Confirm {
-                    message: "Prune?".to_owned(),
-                    on_confirm: ConfirmAction::PruneDigestTags {
-                        repo: "r".to_owned(),
-                        tags: Vec::new(),
-                    },
-                },
+                &Modal::DeleteConfirm(DeleteConfirm {
+                    repo: "r".to_owned(),
+                    tag: "t".to_owned(),
+                    digest: None,
+                    lookup: DeleteLookup::Pending,
+                }),
                 Focus::Repos
             ),
             HelpContext::Normal(Focus::Repos),
-            "Confirm shows its own inline keys, so it falls back to Normal"
+            "DeleteConfirm shows its own inline keys, so it falls back to Normal"
         );
         assert_eq!(
             help_context_for(

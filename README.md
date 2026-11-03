@@ -11,7 +11,6 @@ An interactive TUI browser for Docker registries, written in Rust.
   - **Copy** image cross-registry or cross-repo
   - **Retag** — push manifest under a new tag name
   - **Delete** — remove tag by digest
-  - **Prune** — bulk-delete digest-only (untagged) manifests
   - **Inspect** — view raw manifest and config JSON with syntax highlighting
   - **Export** — save image as an OCI-layout tar archive (skopeo-compatible)
   - **Diff** — compare layer sets between two tags
@@ -271,12 +270,6 @@ Full details of every context: [docs/keybindings.md](docs/keybindings.md).
 Folding a node hides its whole subtree, so collapsing the root line folds the
 entire document. Search auto-expands any folds hiding a match.
 
-### Repository operations (require a repo selected)
-
-| Key | Action |
-|-----|--------|
-| `P` | Prune digest-only (untagged) manifests |
-
 ### Tags panel
 
 | Key | Action |
@@ -324,7 +317,7 @@ for 5 seconds.
 ## Registry requirements
 
 - Docker Registry API v2 (`/v2/` endpoint)
-- For **delete / prune**: `REGISTRY_STORAGE_DELETE_ENABLED=true`
+- For **delete**: `REGISTRY_STORAGE_DELETE_ENABLED=true`
 - Auth: anonymous (including the anonymous Bearer token exchange public Harbor/Quay/GHCR repositories use), HTTP Basic, Bearer token (automatic token exchange with per-endpoint scope retry), or a static access token sent as `Authorization: Bearer`
 - HTTPS strongly recommended; plain HTTP supported for local/internal registries
 
