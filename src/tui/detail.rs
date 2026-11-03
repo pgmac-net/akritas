@@ -21,6 +21,14 @@ pub struct HelmInfo {
     pub version: Option<String>,
     pub app_version: Option<String>,
     pub description: Option<String>,
+    /// Whether the tag being viewed equals the chart's `version` (as Helm
+    /// writes it into a tag). `None` when the chart's version is unknown.
+    ///
+    /// `helm push` always tags a chart with its version, so a mismatch comes
+    /// from other tooling — a retag, `crane`, `oras` — or from a deliberate
+    /// floating tag like `stable`. Helm looks a chart up by tag, so the
+    /// Details pane says when the two differ (#165).
+    pub tag_matches_version: Option<bool>,
     /// `helm pull oci://<host>/<repo> --version <tag>` — the `--version` form
     /// is the unambiguous one; tag-in-reference support varies by Helm version.
     ///
@@ -29,6 +37,13 @@ pub struct HelmInfo {
     /// pasted into a shell, so an unvalidated `; rm -rf ~` in a tag would
     /// become a command. No command is offered rather than a quoted guess.
     pub pull_command: Option<String>,
+}
+
+/// The tag Helm uses for a chart `version`: `+` is not a legal OCI tag
+/// character, so `helm push` writes build metadata `1.2.3+build5` as
+/// `1.2.3_build5`.
+pub fn helm_tag_for_version(version: &str) -> String {
+    version.replace('+', "_")
 }
 
 /// Build the `helm pull` command, or `None` if any part is not a valid OCI
@@ -134,13 +149,17 @@ impl ImageDetail {
                     .and_then(|a| a.get("org.opencontainers.image.created"))
                     .cloned();
                 let chart = chart.cloned().unwrap_or_default();
+                let version = chart.version.map(clean);
+                let tag_matches_version =
+                    version.as_deref().map(|v| helm_tag_for_version(v) == tag);
                 Self {
                     copyable: None,
                     helm: Some(HelmInfo {
                         name: chart.name.map(clean),
-                        version: chart.version.map(clean),
+                        version,
                         app_version: chart.app_version.map(clean),
                         description: chart.description.map(clean),
+                        tag_matches_version,
                         pull_command: helm_pull_command(host, repo, tag),
                     }),
                     digest: resp.digest.clone(),
@@ -308,7 +327,17 @@ pub fn render_lines(detail: &ImageDetail) -> Vec<Line<'static>> {
             ("Description", &helm.description),
         ] {
             if let Some(v) = val {
-                kv(&mut lines, key, Span::styled(v.clone(), VAL_STYLE));
+                if key == "Version" && helm.tag_matches_version == Some(false) {
+                    // The tag Helm resolves is not the version the chart
+                    // declares; say so, dimly — it is accurate, not an error.
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("{key:<12}"), KEY_STYLE),
+                        Span::styled(v.clone(), VAL_STYLE),
+                        Span::styled("  (tag differs)", DIM_STYLE),
+                    ]));
+                } else {
+                    kv(&mut lines, key, Span::styled(v.clone(), VAL_STYLE));
+                }
             }
         }
     }
@@ -629,5 +658,106 @@ mod fail_closed_tests {
             );
             assert_eq!(d.copy_text(), None, "{cfg}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tag_mismatch_tests {
+    use super::*;
+    use crate::registry::{ImageManifest, ManifestDescriptor, media_types};
+
+    fn descriptor(media_type: &str) -> ManifestDescriptor {
+        ManifestDescriptor {
+            media_type: media_type.to_owned(),
+            size: 1,
+            digest: "sha256:abc".to_owned(),
+            platform: None,
+        }
+    }
+
+    fn chart_detail(version: Option<&str>, tag: &str) -> ImageDetail {
+        let resp = ManifestResponse {
+            manifest: Manifest::Image(ImageManifest {
+                schema_version: 2,
+                media_type: media_types::OCI_MANIFEST.to_owned(),
+                config: descriptor(media_types::HELM_CONFIG),
+                layers: vec![descriptor("application/octet-stream")],
+                annotations: None,
+            }),
+            digest: "sha256:deadbeef".to_owned(),
+            content_type: media_types::OCI_MANIFEST.to_owned(),
+            raw: Vec::new(),
+        };
+        let chart = HelmChartConfig {
+            name: Some("demo".to_owned()),
+            version: version.map(str::to_owned),
+            ..HelmChartConfig::default()
+        };
+        ImageDetail::from_manifest_and_config(
+            &resp,
+            None,
+            Some(&chart),
+            "charts/demo",
+            tag,
+            "https://ghcr.io",
+        )
+    }
+
+    fn version_line(d: &ImageDetail) -> String {
+        render_lines(d)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .find(|l| l.starts_with("Version"))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn helm_tag_for_version_encodes_build_metadata() {
+        assert_eq!(helm_tag_for_version("1.2.3"), "1.2.3");
+        assert_eq!(helm_tag_for_version("1.2.3+build5"), "1.2.3_build5");
+    }
+
+    /// The #159 finding: `0.2.0` retagged as `0.2.0-retag` still says 0.2.0.
+    #[test]
+    fn a_tag_that_differs_from_the_chart_version_is_flagged() {
+        let d = chart_detail(Some("0.2.0"), "0.2.0-retag");
+        assert_eq!(d.helm.as_ref().unwrap().tag_matches_version, Some(false));
+        let line = version_line(&d);
+        assert!(
+            line.contains("0.2.0") && line.contains("(tag differs)"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_matching_tag_is_not_flagged() {
+        let d = chart_detail(Some("0.2.0"), "0.2.0");
+        assert_eq!(d.helm.as_ref().unwrap().tag_matches_version, Some(true));
+        assert!(
+            !version_line(&d).contains("tag differs"),
+            "{}",
+            version_line(&d)
+        );
+    }
+
+    /// Helm writes `1.2.3+build5` as the tag `1.2.3_build5`: that is a match.
+    #[test]
+    fn build_metadata_encoded_the_helm_way_matches() {
+        let d = chart_detail(Some("1.2.3+build5"), "1.2.3_build5");
+        assert_eq!(d.helm.as_ref().unwrap().tag_matches_version, Some(true));
+        assert!(!version_line(&d).contains("tag differs"));
+    }
+
+    /// With no version to compare against there is nothing to claim.
+    #[test]
+    fn an_unknown_version_makes_no_claim() {
+        let d = chart_detail(None, "stable");
+        assert_eq!(d.helm.as_ref().unwrap().tag_matches_version, None);
+        assert!(version_line(&d).is_empty());
     }
 }

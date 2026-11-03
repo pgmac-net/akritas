@@ -720,6 +720,29 @@ impl DeleteConfirm {
     }
 }
 
+/// The retag prompt. A prompt may carry a second line after `\n`: the input
+/// modal shows the first as its title and the rest as a dim hint.
+///
+/// For a Helm chart the hint warns — without blocking — that Helm looks a chart
+/// up by tag, so a tag that differs from the chart's `version` will not match
+/// it. Retagging a chart to a name like `stable` is legitimate, so this is
+/// information, not a confirmation step (#165).
+pub fn retag_prompt(repo: &str, tag: &str, detail: Option<&ImageDetail>) -> String {
+    let base = format!("New tag for '{repo}:{tag}'");
+    match detail.and_then(|d| d.helm.as_ref()) {
+        None => format!("{base}:"),
+        Some(helm) => {
+            let what = match &helm.version {
+                Some(v) => format!("Helm chart, version {v}"),
+                None => "Helm chart".to_owned(),
+            };
+            format!(
+                "{base} ({what}):\nHelm looks a chart up by its tag. A tag that differs from the chart version will not match it."
+            )
+        }
+    }
+}
+
 /// `sha256:` plus the first 12 hex digits — enough to tell manifests apart.
 pub fn short_digest(digest: &str) -> String {
     digest.chars().take(19).collect()
@@ -2106,8 +2129,16 @@ impl App {
         let Some(repo) = self.current_repo.clone() else {
             return;
         };
+        // Details belong to `current_tag`; use them only when they are the
+        // selected tag's, so a stale pane never labels the wrong tag a chart.
+        let detail = if self.current_tag.as_deref() == Some(tag.as_str()) {
+            self.detail.as_ref()
+        } else {
+            None
+        };
+        let prompt = retag_prompt(&repo, &tag, detail);
         self.modal = Modal::Input {
-            prompt: format!("New tag for '{repo}:{tag}':"),
+            prompt,
             input: InputState::default(),
             on_confirm: InputAction::Retag { repo, src_tag: tag },
         };
@@ -2661,6 +2692,102 @@ mod tests {
         let mut app = make_app_with_tags("r", vec!["a", "b"]);
         app.on_delete_success("r", "a", "sha256:x", &[], true);
         assert_eq!(app.status_text(), Some("✓ Deleted r:a"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Retag prompt for Helm charts (issue #165)
+    // -----------------------------------------------------------------------
+
+    fn chart_detail_for(tag: &str, version: Option<&str>) -> ImageDetail {
+        use crate::registry::{
+            HelmChartConfig, ImageManifest, Manifest, ManifestDescriptor, ManifestResponse,
+            media_types,
+        };
+        let d = |mt: &str| ManifestDescriptor {
+            media_type: mt.to_owned(),
+            size: 1,
+            digest: "sha256:abc".to_owned(),
+            platform: None,
+        };
+        let resp = ManifestResponse {
+            manifest: Manifest::Image(ImageManifest {
+                schema_version: 2,
+                media_type: media_types::OCI_MANIFEST.to_owned(),
+                config: d(media_types::HELM_CONFIG),
+                layers: vec![d("application/octet-stream")],
+                annotations: None,
+            }),
+            digest: "sha256:x".to_owned(),
+            content_type: media_types::OCI_MANIFEST.to_owned(),
+            raw: Vec::new(),
+        };
+        let chart = HelmChartConfig {
+            version: version.map(str::to_owned),
+            ..HelmChartConfig::default()
+        };
+        ImageDetail::from_manifest_and_config(
+            &resp,
+            None,
+            Some(&chart),
+            "charts/demo",
+            tag,
+            "https://ghcr.io",
+        )
+    }
+
+    #[test]
+    fn retag_prompt_is_unchanged_for_images_and_when_details_are_missing() {
+        assert_eq!(retag_prompt("r", "v1", None), "New tag for 'r:v1':");
+    }
+
+    #[test]
+    fn retag_prompt_warns_for_a_chart_and_names_its_version() {
+        let d = chart_detail_for("0.2.0", Some("0.2.0"));
+        let p = retag_prompt("charts/demo", "0.2.0", Some(&d));
+        let (title, hint) = p.split_once('\n').expect("a hint line");
+        assert_eq!(
+            title,
+            "New tag for 'charts/demo:0.2.0' (Helm chart, version 0.2.0):"
+        );
+        assert!(hint.contains("looks a chart up by its tag"), "{hint}");
+        assert!(hint.contains("will not match"), "{hint}");
+    }
+
+    #[test]
+    fn retag_prompt_still_warns_for_a_chart_with_an_unknown_version() {
+        let d = chart_detail_for("x", None);
+        let p = retag_prompt("charts/demo", "x", Some(&d));
+        assert!(
+            p.starts_with("New tag for 'charts/demo:x' (Helm chart):\n"),
+            "{p}"
+        );
+    }
+
+    /// `start_retag` uses the loaded Details only when they are the selected
+    /// tag's, so a stale pane never labels a different tag as a chart.
+    #[test]
+    fn start_retag_uses_details_only_for_the_selected_tag() {
+        let mut app = make_app_with_tags("charts/demo", vec!["0.2.0", "0.1.0"]);
+        app.focus = Focus::Tags;
+        app.tags_state.select(Some(0));
+        let selected = app.selected_tag().unwrap().to_owned();
+
+        app.current_tag = Some(selected.clone());
+        app.detail = Some(chart_detail_for(&selected, Some("0.2.0")));
+        app.start_retag();
+        assert!(matches!(
+            &app.modal,
+            Modal::Input { prompt, .. } if prompt.contains("Helm chart, version 0.2.0")
+        ));
+
+        // Details for some other tag: plain prompt.
+        app.modal = Modal::None;
+        app.current_tag = Some("0.1.0-elsewhere".to_owned());
+        app.start_retag();
+        assert!(matches!(
+            &app.modal,
+            Modal::Input { prompt, .. } if !prompt.contains("Helm chart")
+        ));
     }
 
     fn make_app_with_tags(repo: &str, tags: Vec<&str>) -> App {

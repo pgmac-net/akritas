@@ -534,13 +534,29 @@ fn draw_delete_confirm_modal(frame: &mut Frame, dialog: &DeleteConfirm, area: Re
 const MASK_CHAR: char = '•';
 
 fn draw_input_modal(frame: &mut Frame, prompt: &str, input: &InputState, secret: bool, area: Rect) {
-    let modal_area = popup_rect(area, 60, 50, 5);
+    // A prompt may carry a hint after a newline: the first line is the title,
+    // the rest is explanatory text shown where the blank row would be.
+    let (title, hint) = match prompt.split_once('\n') {
+        Some((title, hint)) => (title, Some(hint)),
+        None => (prompt, None),
+    };
+
+    // Size the popup for the hint once the width is known: the hint wraps, so
+    // it may need a few rows, and the popup grows to fit rather than pushing
+    // the footer out.
+    let probe_width = popup_rect(area, 60, 50, 5).width;
+    let hint_rows = hint.map_or(1, |h| {
+        let inner = (probe_width as usize).saturating_sub(2).max(1);
+        // Over-estimate by 10% — word wrapping wastes some of every row.
+        (h.chars().count() * 11 / 10).div_ceil(inner).clamp(1, 4) as u16
+    });
+    let modal_area = popup_rect(area, 60, 50, 4 + hint_rows);
     let width = modal_area.width;
 
     frame.render_widget(Clear, modal_area);
 
     let block = Block::default()
-        .title(format!(" {prompt} "))
+        .title(format!(" {title} "))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
 
@@ -571,10 +587,18 @@ fn draw_input_modal(frame: &mut Frame, prompt: &str, input: &InputState, secret:
 
     let lines = vec![
         Line::from(cursor_spans(&visible, col)),
-        Line::raw(""),
+        match hint {
+            Some(h) => Line::from(Span::styled(
+                h.to_owned(),
+                Style::default().fg(Color::Yellow),
+            )),
+            None => Line::raw(""),
+        },
         Line::raw(footer),
     ];
-    let p = Paragraph::new(lines).block(block);
+    let p = Paragraph::new(lines)
+        .block(block)
+        .wrap(Wrap { trim: false });
 
     frame.render_widget(p, modal_area);
 }
@@ -2075,5 +2099,57 @@ mod tests {
                 "{focus:?} help still mentions prune"
             );
         }
+    }
+
+    /// A prompt's second line is a hint, rendered inside the popup rather
+    /// than crammed into the border title.
+    #[test]
+    fn input_modal_shows_a_prompt_hint_under_the_field() {
+        let mut app = make_app();
+        app.modal = Modal::Input {
+            prompt: "New tag for 'r:1' (Helm chart, version 1):\nHelm looks a chart up by its tag."
+                .to_owned(),
+            input: InputState::default(),
+            on_confirm: InputAction::BrowseRepo,
+        };
+        let screen = render_to_string(&mut app, 120, 30);
+        assert!(
+            screen.contains("New tag for 'r:1' (Helm chart, version 1):"),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Helm looks a chart up by its tag."),
+            "{screen}"
+        );
+        assert!(screen.contains("[Enter] Confirm"), "{screen}");
+    }
+
+    /// A long hint wraps and grows the popup instead of pushing the footer
+    /// out of view, even on a narrow terminal.
+    #[test]
+    fn a_long_prompt_hint_wraps_and_keeps_the_footer_visible() {
+        let mut app = make_app();
+        app.modal = Modal::Input {
+            prompt: format!("Title:\n{}", "word ".repeat(40)),
+            input: InputState::default(),
+            on_confirm: InputAction::BrowseRepo,
+        };
+        let screen = render_to_string(&mut app, 70, 30);
+        assert!(screen.contains("[Enter] Confirm"), "{screen}");
+    }
+
+    #[test]
+    fn prompts_without_a_hint_render_as_before() {
+        let mut app = make_app();
+        app.modal = Modal::Input {
+            prompt: "Name:".to_owned(),
+            input: InputState::default(),
+            on_confirm: InputAction::BrowseRepo,
+        };
+        let screen = render_to_string(&mut app, 100, 20);
+        assert!(
+            screen.contains("Name:") && screen.contains("[Enter] Confirm"),
+            "{screen}"
+        );
     }
 }
