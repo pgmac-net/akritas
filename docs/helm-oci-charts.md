@@ -98,15 +98,31 @@ Three general behaviours were fixed, and each helps non-Helm registries too:
 
 ## Other operations on charts
 
-Copy-to (`C`), retag (`r`), diff (`D`), export (`e`), prune (`P`) and delete
-(`d`) are generic manifest and blob operations and do not look at the media
-type, so they are expected to work on charts. This was **not verified** against
-a writable chart registry. Both sample registries are read-only to us.
+Verified against a local `registry:2` (delete enabled) with charts pushed by
+`helm push` (issue [#159](https://github.com/pgmac-net/docker-registry-walk/issues/159)).
+These operations are generic manifest and blob operations and nothing in them
+assumes an image config, so charts behave like images:
+
+| Op | On a chart |
+|----|-----------|
+| Copy-to `C` | Works. Manifest digest is preserved, and `helm pull` of the copy is byte-identical to the original |
+| Export `e` | Works. The OCI-layout tar round-trips: `skopeo copy oci-archive:… docker://…` back into the registry, then `helm pull`, gives the same manifest digest and tarball |
+| Retag `r` | Works, but the new tag is just a tag: it need not match the chart's `Chart.yaml` `version` |
+| Diff `D` | Works: shows the chart layer added/removed |
+| Delete `d` | Works, but deletes **by digest**: every tag pointing at that manifest goes with it, and the tag list is not refreshed afterwards |
+| Prune `P` | Finds nothing. It matches tags literally named `sha256:<hex>`, which cannot exist on a spec-compliant registry (`:` is not a legal tag character) |
+
+Export writes to `<dest>.partial` and renames it into place only when the
+archive is complete, so a file at the destination is always a whole export.
+
+Copy and export used to crash the TUI on their first progress tick
+(`Sender::blocking_send` called from a tokio worker). That affected container
+images as well as charts and is fixed in #159.
 
 ## Not covered (follow-ups)
 
-- Verify write operations on charts against a local `registry:2` with
-  `helm push`.
+- Delete removing sibling tags silently, prune never matching, and retag vs
+  `Chart.yaml` `version` (filed as separate issues from #159).
 - Semver-aware tag sort. Tags sort lexically (`0.10.0` before `0.2.0`).
 - A `repositories = [...]` seed list for registries with no browsable catalog,
   so a known set of charts is one keystroke away.
