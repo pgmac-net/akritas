@@ -64,23 +64,29 @@ pub enum CatalogAttempt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortOrder {
-    NameAsc,
-    NameDesc,
+    /// Newest version first — the default, since picking a version is what
+    /// the Tags pane is for. See `tagsort` for what counts as a version.
+    VersionDesc,
+    VersionAsc,
 }
 
 impl SortOrder {
     pub fn cycle(self) -> Self {
         match self {
-            Self::NameAsc => Self::NameDesc,
-            Self::NameDesc => Self::NameAsc,
+            Self::VersionDesc => Self::VersionAsc,
+            Self::VersionAsc => Self::VersionDesc,
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::NameAsc => "↑ name",
-            Self::NameDesc => "↓ name",
+            Self::VersionDesc => "↓ version",
+            Self::VersionAsc => "↑ version",
         }
+    }
+
+    fn newest_first(self) -> bool {
+        self == Self::VersionDesc
     }
 }
 
@@ -764,7 +770,7 @@ impl App {
             repo_load: LoadState::Idle,
             tag_load: LoadState::Idle,
             detail_load: LoadState::Idle,
-            tag_sort: SortOrder::NameAsc,
+            tag_sort: SortOrder::VersionDesc,
             detail: None,
             detail_scroll: 0,
             current_tag: None,
@@ -1644,15 +1650,20 @@ impl App {
                 .cloned()
                 .collect()
         };
-        match self.tag_sort {
-            SortOrder::NameAsc => filtered.sort(),
-            SortOrder::NameDesc => {
-                filtered.sort();
-                filtered.reverse();
-            }
-        }
+        super::tagsort::sort_tags(&mut filtered, self.tag_sort.newest_first());
+
+        // Keep the selection on the same *tag*, not the same row. A new page,
+        // a filter edit or `s` re-sorts the list, and with newest-first a page
+        // of newer versions inserts rows above the highlight — an index-based
+        // selection would silently land on a different tag and reload Details
+        // for a tag the user never picked (#160).
+        let previous = self.selected_tag().map(str::to_owned);
         self.tags = filtered;
-        self.clamp_tag_selection();
+        let kept = previous.and_then(|tag| self.tags.iter().position(|t| *t == tag));
+        match kept {
+            Some(i) => self.tags_state.select(Some(i)),
+            None => self.clamp_tag_selection(),
+        }
     }
 
     fn clamp_repo_selection(&mut self) {
@@ -1926,6 +1937,82 @@ mod tests {
         let mut app = make_app();
         app.on_repos_page(repos.into_iter().map(str::to_owned).collect(), false);
         app
+    }
+
+    // -----------------------------------------------------------------------
+    // Version-aware tag sort (issue #160)
+    // -----------------------------------------------------------------------
+
+    fn page(app: &mut App, repo: &str, tags: &[&str]) {
+        app.on_tags_page(
+            repo.to_owned(),
+            tags.iter().map(|t| (*t).to_owned()).collect(),
+            true,
+        );
+    }
+
+    #[test]
+    fn tags_default_to_newest_version_first() {
+        let app = make_app_with_tags("r", vec!["0.2.0", "0.10.0", "latest", "0.9.3"]);
+        assert_eq!(app.tag_sort, SortOrder::VersionDesc);
+        assert_eq!(app.tags, ["0.10.0", "0.9.3", "0.2.0", "latest"]);
+        assert_eq!(app.tag_sort.label(), "↓ version");
+    }
+
+    #[test]
+    fn cycling_the_sort_flips_versions_and_keeps_non_versions_last() {
+        let mut app = make_app_with_tags("r", vec!["0.2.0", "0.10.0", "latest"]);
+        app.tag_sort = app.tag_sort.cycle();
+        app.resort_tags();
+        assert_eq!(app.tags, ["0.2.0", "0.10.0", "latest"]);
+        assert_eq!(app.tag_sort.label(), "↑ version");
+        app.tag_sort = app.tag_sort.cycle();
+        app.resort_tags();
+        assert_eq!(app.tags, ["0.10.0", "0.2.0", "latest"]);
+    }
+
+    /// The reason selection follows the tag: with newest-first, a later page
+    /// of newer versions inserts rows *above* the highlight. An index-based
+    /// selection would slide onto a different tag.
+    #[test]
+    fn selection_stays_on_the_same_tag_when_a_page_inserts_newer_versions_above() {
+        let mut app = make_app();
+        app.start_tags_load("r".to_owned());
+        page(&mut app, "r", &["1.0.0", "0.9.0", "0.8.0"]);
+        app.tags_state.select(Some(1));
+        assert_eq!(app.selected_tag(), Some("0.9.0"));
+
+        page(&mut app, "r", &["3.0.0", "2.0.0"]);
+
+        assert_eq!(app.tags, ["3.0.0", "2.0.0", "1.0.0", "0.9.0", "0.8.0"]);
+        assert_eq!(app.selected_tag(), Some("0.9.0"));
+    }
+
+    #[test]
+    fn selection_stays_on_the_same_tag_when_the_sort_is_toggled() {
+        let mut app = make_app_with_tags("r", vec!["0.2.0", "0.10.0", "0.9.3"]);
+        app.tags_state.select(Some(2));
+        assert_eq!(app.selected_tag(), Some("0.2.0"));
+
+        app.tag_sort = app.tag_sort.cycle();
+        app.resort_tags();
+
+        assert_eq!(app.selected_tag(), Some("0.2.0"));
+    }
+
+    /// If the selected tag is filtered out there is nothing to follow: fall
+    /// back to a valid row rather than an out-of-range selection.
+    #[test]
+    fn selection_falls_back_to_a_valid_row_when_the_tag_is_filtered_out() {
+        let mut app = make_app_with_tags("r", vec!["1.0.0", "2.0.0", "3.0.0"]);
+        app.tags_state.select(Some(2));
+        assert_eq!(app.selected_tag(), Some("1.0.0"));
+
+        app.tag_filter = "3.0".to_owned();
+        app.resort_tags();
+
+        assert_eq!(app.tags, ["3.0.0"]);
+        assert_eq!(app.selected_tag(), Some("3.0.0"));
     }
 
     fn make_app_with_tags(repo: &str, tags: Vec<&str>) -> App {

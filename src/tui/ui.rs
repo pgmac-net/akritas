@@ -1171,7 +1171,7 @@ fn help_lines_normal(focus: Focus) -> Vec<Line<'static>> {
             lines.push(help_kv("D", "Diff layers against another tag"));
             lines.push(help_blank());
             lines.push(help_header("Tags panel"));
-            lines.push(help_kv("s", "Cycle tag sort order (↑ / ↓ name)"));
+            lines.push(help_kv("s", "Cycle tag sort order (↓ / ↑ version)"));
         }
         Focus::Detail => {
             lines.push(help_header("Image operations  (require a tag selected)"));
