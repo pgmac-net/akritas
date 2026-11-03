@@ -9,7 +9,45 @@ use crate::registry::{Manifest, ManifestResponse, RegistryClient};
 ///
 /// The resulting file is compatible with `skopeo copy oci-archive:<path>`.
 /// Multi-arch index manifests are not supported.
+///
+/// The archive is written to `<dest>.partial` and renamed into place only when
+/// complete, so a file at `dest` is always a whole export — never the stub a
+/// failed or interrupted run would otherwise leave looking like a valid tar.
 pub async fn export_image(
+    client: &RegistryClient,
+    repo: &str,
+    tag: &str,
+    dest: &Path,
+    on_progress: impl Fn(usize, usize),
+) -> anyhow::Result<()> {
+    let partial = partial_path(dest);
+    let result = write_export(client, repo, tag, &partial, on_progress).await;
+    finalize_export(&partial, dest, result)
+}
+
+/// `<dest>.partial`, beside `dest` so the final rename stays on one filesystem.
+fn partial_path(dest: &Path) -> std::path::PathBuf {
+    let mut name = dest.as_os_str().to_owned();
+    name.push(".partial");
+    std::path::PathBuf::from(name)
+}
+
+/// Promote a finished export, or clean up after a failed one.
+fn finalize_export(partial: &Path, dest: &Path, result: anyhow::Result<()>) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => {
+            std::fs::rename(partial, dest)?;
+            Ok(())
+        }
+        Err(e) => {
+            // Best effort: the original error is the one worth reporting.
+            let _ = std::fs::remove_file(partial);
+            Err(e)
+        }
+    }
+}
+
+async fn write_export(
     client: &RegistryClient,
     repo: &str,
     tag: &str,
@@ -92,4 +130,62 @@ fn build_index_json(resp: &ManifestResponse, tag: &str) -> anyhow::Result<String
         }]
     });
     Ok(serde_json::to_string_pretty(&index)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_path_sits_beside_dest() {
+        assert_eq!(
+            partial_path(Path::new("/x/y/img.tar")),
+            Path::new("/x/y/img.tar.partial")
+        );
+    }
+
+    #[test]
+    fn successful_export_leaves_only_the_final_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("img.tar");
+        let partial = partial_path(&dest);
+        std::fs::write(&partial, b"whole archive").unwrap();
+
+        finalize_export(&partial, &dest, Ok(())).unwrap();
+
+        assert!(dest.exists());
+        assert!(!partial.exists());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"whole archive");
+    }
+
+    /// A failed export must leave neither a truncated `.tar` that looks valid
+    /// nor a stray `.partial`, and must surface the original error.
+    #[test]
+    fn failed_export_leaves_no_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("img.tar");
+        let partial = partial_path(&dest);
+        std::fs::write(&partial, b"half").unwrap();
+
+        let err = finalize_export(&partial, &dest, Err(anyhow::anyhow!("blob fetch failed")))
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "blob fetch failed");
+        assert!(!dest.exists());
+        assert!(!partial.exists());
+    }
+
+    /// A failure must not clobber an export that already exists at `dest`.
+    #[test]
+    fn failed_export_keeps_a_previous_complete_export() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("img.tar");
+        std::fs::write(&dest, b"previous good export").unwrap();
+        let partial = partial_path(&dest);
+        std::fs::write(&partial, b"half").unwrap();
+
+        let _ = finalize_export(&partial, &dest, Err(anyhow::anyhow!("boom")));
+
+        assert_eq!(std::fs::read(&dest).unwrap(), b"previous good export");
+    }
 }

@@ -1883,6 +1883,21 @@ fn artifactory_root_client<'a>(
 // Async task spawners
 // ------------------------------------------------------------------
 
+/// Send a progress tick from an `ops` progress callback.
+///
+/// Those callbacks are synchronous but run on a tokio worker (inside
+/// `spawn_copy`/`spawn_export`'s task), where `Sender::blocking_send` panics
+/// with "Cannot block the current thread from within a runtime" — which took
+/// the whole TUI down on the first tick of every copy and export (#159).
+/// `try_send` never blocks. A tick dropped on a full channel is harmless: it
+/// is cosmetic, and the terminal success/error event is sent with an awaited
+/// `send`, so nothing that matters can be lost. Do not "fix" this back to
+/// `blocking_send`; the only legitimate users of it are the dedicated
+/// crossterm reader thread above, which is not a runtime worker.
+fn send_progress(tx: &mpsc::Sender<AppEvent>, event: AppEvent) {
+    let _ = tx.try_send(event);
+}
+
 fn spawn_copy(
     client: RegistryClient,
     src_repo: String,
@@ -1900,7 +1915,7 @@ fn spawn_copy(
             &dst_repo,
             &dst_tag,
             |done, total| {
-                let _ = tx.blocking_send(AppEvent::CopyProgress { done, total });
+                send_progress(&tx, AppEvent::CopyProgress { done, total });
             },
         )
         .await;
@@ -2004,7 +2019,7 @@ fn spawn_export(
         let dest = std::path::PathBuf::from(&path);
         let result =
             crate::ops::export::export_image(&client, &repo, &tag, &dest, |done, total| {
-                let _ = tx.blocking_send(AppEvent::ExportProgress { done, total });
+                send_progress(&tx, AppEvent::ExportProgress { done, total });
             })
             .await;
         match result {
@@ -2523,6 +2538,36 @@ mod tests {
         let mut app = App::new(vec![profile], 0);
         app.modal = modal;
         app
+    }
+
+    // -----------------------------------------------------------------------
+    // Progress ticks from inside the runtime (issue #159)
+    // -----------------------------------------------------------------------
+
+    /// Regression: `blocking_send` panicked when called from a tokio worker,
+    /// which is where `ops` progress callbacks run. Calling the helper from
+    /// inside a runtime must neither panic nor block.
+    #[tokio::test]
+    async fn send_progress_does_not_panic_inside_a_runtime() {
+        let (tx, mut rx) = mpsc::channel(8);
+        send_progress(&tx, AppEvent::CopyProgress { done: 1, total: 3 });
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppEvent::CopyProgress { done: 1, total: 3 })
+        ));
+    }
+
+    /// A full channel drops the tick instead of blocking the worker.
+    #[tokio::test]
+    async fn send_progress_drops_the_tick_when_the_channel_is_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        send_progress(&tx, AppEvent::ExportProgress { done: 1, total: 9 });
+        send_progress(&tx, AppEvent::ExportProgress { done: 2, total: 9 });
+        assert!(matches!(
+            rx.recv().await,
+            Some(AppEvent::ExportProgress { done: 1, .. })
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     // -----------------------------------------------------------------------
