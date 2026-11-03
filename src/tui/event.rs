@@ -15,9 +15,9 @@ use crate::ops::diff::DiffLayer;
 use crate::registry::ecr::{self, EcrTarget};
 use crate::registry::{
     AccessTokenCredentials, ArtifactoryRepo, BasicCredentials, BearerCredentials, Credentials,
-    EcrCredentials, GhcrCredentials, ImageConfigBlob, KeyringStore, Manifest, RegistryClient,
-    RegistryError, Secret, TOKEN_ACCOUNT, list_owners, list_packages, resolve_access_token,
-    sanitize_pasted_token, search_dockerhub,
+    EcrCredentials, GhcrCredentials, HelmChartConfig, ImageConfigBlob, KeyringStore, Manifest,
+    RegistryClient, RegistryError, Secret, TOKEN_ACCOUNT, list_owners, list_packages,
+    resolve_access_token, sanitize_pasted_token, search_dockerhub,
 };
 
 use super::app::{
@@ -482,7 +482,7 @@ pub(super) async fn event_loop(
                             }
                         } else {
                             let show_browse =
-                                !auth_failed || attempt == CatalogAttempt::AfterCredential || is_dh;
+                                should_offer_browse(auth_failed, attempt, is_dh, &profile);
                             app.on_repos_error(msg, show_browse);
                             if auth_failed
                                 && attempt != CatalogAttempt::AfterCredential
@@ -576,7 +576,10 @@ pub(super) async fn event_loop(
         let new_tag = app.selected_tag().map(str::to_owned);
         if new_tag != prev_tag
             && let Some(tag) = new_tag
-            && let Some(repo) = app.selected_repo().map(str::to_owned)
+            // `current_repo`, not the Repos-pane selection: after browse-by-name
+            // (or a Docker Hub search pick) the pane is empty but the tags
+            // belong to `current_repo`, and Details must follow them.
+            && let Some(repo) = detail_repo(&app)
         {
             app.start_detail_load(tag.clone());
             spawn_detail_fetch(
@@ -600,7 +603,7 @@ pub(super) async fn event_loop(
 
         // Background pagination: load more tags if user is near the end.
         if app.should_load_more_tags()
-            && let Some(repo) = app.current_repo.clone()
+            && let Some(repo) = detail_repo(&app)
         {
             app.tag_load = LoadState::Loading;
             spawn_tags_fetch(
@@ -1602,7 +1605,10 @@ async fn make_client_for_profile_at(
     let ResolvedSecrets { token, password } = resolve_secrets(profile).await;
 
     let creds: Arc<dyn Credentials> = match profile.auth_kind(token.is_some(), password.is_some()) {
-        AuthKind::None => return RegistryClient::new(url),
+        // No credential to send, but a public registry on token auth (Harbor,
+        // Quay, ...) still wants an anonymous token exchange, which a bare
+        // client cannot do — see `GhcrCredentials::anonymous`.
+        AuthKind::None => Arc::new(GhcrCredentials::anonymous(&url)),
         AuthKind::AccessToken => Arc::new(AccessTokenCredentials::new(
             &url,
             token.unwrap_or_default(),
@@ -1807,6 +1813,33 @@ fn is_auth_failure(e: &RegistryError) -> bool {
 enum AuthPrompt {
     Password { username: String },
     Token,
+}
+
+/// Whether a failed catalog load should open the browse-by-name prompt.
+///
+/// A profile with no credential source (`auth_prompt_for` is `None`) has
+/// nothing to prompt for, so a refused catalog (Harbor, GHCR, ...) would
+/// otherwise be a dead end: browse-by-name is the only useful next step.
+fn should_offer_browse(
+    auth_failed: bool,
+    attempt: CatalogAttempt,
+    is_dockerhub: bool,
+    profile: &RegistryProfile,
+) -> bool {
+    !auth_failed
+        || attempt == CatalogAttempt::AfterCredential
+        || is_dockerhub
+        || auth_prompt_for(profile).is_none()
+}
+
+/// The repository whose tag is shown in Details.
+///
+/// `current_repo`, not the Repos-pane selection: after browse-by-name (or a
+/// Docker Hub search pick) the pane is empty but the tags belong to
+/// `current_repo`, and Details must follow them. When the catalog works the two
+/// are equal.
+fn detail_repo(app: &App) -> Option<String> {
+    app.current_repo.clone()
 }
 
 /// What to prompt for on a 401, or `None` when the profile is anonymous and
@@ -2066,17 +2099,25 @@ fn spawn_detail_fetch(
             }
         };
 
-        let config: Option<ImageConfigBlob> = match &manifest_resp.manifest {
-            Manifest::Image(img) => match client.get_blob(&repo, &img.config.digest).await {
-                Ok(bytes) => serde_json::from_slice::<ImageConfigBlob>(&bytes).ok(),
-                Err(_) => None,
-            },
-            Manifest::Index(_) => None,
-        };
+        // A Helm chart's config blob is `Chart.yaml`, not an image config —
+        // parsing it as one succeeds with every field empty, so branch on the
+        // manifest's config media type and fetch the blob once.
+        let (config, chart): (Option<ImageConfigBlob>, Option<HelmChartConfig>) =
+            match &manifest_resp.manifest {
+                Manifest::Image(img) => match client.get_blob(&repo, &img.config.digest).await {
+                    Ok(bytes) if img.is_helm_chart() => {
+                        (None, serde_json::from_slice::<HelmChartConfig>(&bytes).ok())
+                    }
+                    Ok(bytes) => (serde_json::from_slice::<ImageConfigBlob>(&bytes).ok(), None),
+                    Err(_) => (None, None),
+                },
+                Manifest::Index(_) => (None, None),
+            };
 
         let d = ImageDetail::from_manifest_and_config(
             &manifest_resp,
             config.as_ref(),
+            chart.as_ref(),
             &repo,
             &tag,
             &registry_url,
@@ -2482,6 +2523,62 @@ mod tests {
         let mut app = App::new(vec![profile], 0);
         app.modal = modal;
         app
+    }
+
+    // -----------------------------------------------------------------------
+    // Browse-by-name fallback and Details target (issue #157)
+    // -----------------------------------------------------------------------
+
+    /// An anonymous profile has no credential to prompt for, so a refused
+    /// catalog (Harbor answers 401 anonymously) must open browse-by-name
+    /// instead of dead-ending on the error text.
+    #[test]
+    fn anonymous_catalog_401_offers_browse_by_name() {
+        let anonymous = anon_profile("harbor", "https://h.example.com/", RegistryType::Standard);
+        assert!(should_offer_browse(
+            true,
+            CatalogAttempt::Initial,
+            false,
+            &anonymous
+        ));
+    }
+
+    /// A profile that *can* prompt keeps today's behaviour: re-read/prompt for
+    /// a credential first, browse-by-name only after that has failed.
+    #[test]
+    fn credentialed_catalog_401_still_prompts_before_browse() {
+        let mut creds = anon_profile("art", "https://a.example.com/", RegistryType::Standard);
+        creds.username = Some("ci".to_owned());
+        assert!(!should_offer_browse(
+            true,
+            CatalogAttempt::Initial,
+            false,
+            &creds
+        ));
+        assert!(should_offer_browse(
+            true,
+            CatalogAttempt::AfterCredential,
+            false,
+            &creds
+        ));
+        // Non-auth failures (404, network) always offer browse-by-name.
+        assert!(should_offer_browse(
+            false,
+            CatalogAttempt::Initial,
+            false,
+            &creds
+        ));
+    }
+
+    /// After browse-by-name the Repos pane is empty; Details must still follow
+    /// the repository whose tags are showing.
+    #[test]
+    fn detail_repo_follows_current_repo_when_repos_pane_is_empty() {
+        let mut app = app_with_modal(Modal::None);
+        assert_eq!(detail_repo(&app), None);
+        app.start_tags_load("library/n8n".to_owned());
+        assert!(app.selected_repo().is_none());
+        assert_eq!(detail_repo(&app).as_deref(), Some("library/n8n"));
     }
 
     #[test]

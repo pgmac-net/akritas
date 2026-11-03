@@ -10,6 +10,8 @@ pub mod media_types {
     pub const DOCKER_MANIFEST_V2: &str = "application/vnd.docker.distribution.manifest.v2+json";
     pub const DOCKER_MANIFEST_LIST: &str =
         "application/vnd.docker.distribution.manifest.list.v2+json";
+    /// Config-blob media type of a Helm chart stored as an OCI artifact.
+    pub const HELM_CONFIG: &str = "application/vnd.cncf.helm.config.v1+json";
 }
 
 /// Ordered list of Accept values to send when fetching manifests.
@@ -71,6 +73,22 @@ pub struct ImageConfigSection {
     pub labels: Option<HashMap<String, String>>,
 }
 
+/// Helm chart metadata (`Chart.yaml` as JSON) — the config blob of a Helm
+/// chart pushed as an OCI artifact. Every field is optional so a sparse or
+/// future chart config still renders whatever it does carry.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HelmChartConfig {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub app_version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// Single-arch image manifest (OCI v1 or Docker v2 schema 2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,6 +98,16 @@ pub struct ImageManifest {
     pub media_type: String,
     pub config: ManifestDescriptor,
     pub layers: Vec<ManifestDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<HashMap<String, String>>,
+}
+
+impl ImageManifest {
+    /// True when the config blob is a Helm chart's, i.e. this "image" is a
+    /// chart. Detected per manifest, never per registry: one host serves both.
+    pub fn is_helm_chart(&self) -> bool {
+        self.config.media_type == media_types::HELM_CONFIG
+    }
 }
 
 /// Multi-arch manifest index (OCI) / manifest list (Docker).

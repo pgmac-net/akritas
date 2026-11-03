@@ -512,6 +512,18 @@ impl GhcrCredentials {
             token,
         }
     }
+
+    /// Credentials for a profile that has none: send nothing, but answer a
+    /// same-origin Bearer challenge with an anonymous token exchange.
+    ///
+    /// That is how an unauthenticated `docker pull` of a public image works on
+    /// any token-auth registry (Harbor, Quay, GHCR, ...). A bare client with no
+    /// credentials at all cannot do it and fails every request on such a
+    /// registry with 401. Registries that issue no challenge are unaffected —
+    /// nothing is ever sent.
+    pub fn anonymous(registry: &Url) -> Self {
+        Self::new(registry, None)
+    }
 }
 
 #[async_trait]
@@ -1433,6 +1445,22 @@ mod tests {
             rt.block_on(creds.get_authorization(&http)),
             Some("Basic QVdTOnB3".to_owned()),
             "an unexpired ECR token must be presented without a challenge"
+        );
+    }
+
+    /// An anonymous profile sends nothing up front (so an open registry is
+    /// untouched) and still refuses a realm on another host.
+    #[test]
+    fn anonymous_credentials_send_nothing_and_reject_an_off_origin_realm() {
+        let creds = GhcrCredentials::anonymous(&u("https://harbor.example.com/"));
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let http = Client::new();
+
+        assert_eq!(rt.block_on(creds.get_authorization(&http)), None);
+        let challenge = r#"Bearer realm="https://evil.example.com/token",service="harbor""#;
+        assert_eq!(
+            rt.block_on(creds.get_authorization_for_challenge(&http, challenge)),
+            None
         );
     }
 
