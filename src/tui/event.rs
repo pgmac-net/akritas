@@ -264,6 +264,19 @@ pub(super) async fn event_loop(
         spawn_repos_fetch(clients[&active_name].clone(), None, tx.clone());
     }
 
+    // Configured repositories are selected before the loop takes its first
+    // "previous selection" snapshot, so the selection-change detection below
+    // would never see the first seed being selected. Load its tags here.
+    if let Some(repo) = app.selected_repo().map(str::to_owned) {
+        app.start_tags_load(repo.clone());
+        spawn_tags_fetch(
+            active_client(&clients, &active_name, &not_connected),
+            repo,
+            None,
+            tx.clone(),
+        );
+    }
+
     loop {
         terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -1291,6 +1304,7 @@ fn handle_key(
         KeyCode::Char('P') => handle_prune(app, client, tx),
         KeyCode::Char('e') => app.start_export(),
         KeyCode::Char('D') => app.start_diff(),
+        KeyCode::Char('o') => app.start_open_repo(),
         KeyCode::Char('?') => open_help(app),
         _ => {}
     }
@@ -2349,6 +2363,7 @@ mod tests {
             owner: None,
             aws_profile: None,
             region: None,
+            repositories: Vec::new(),
         }
     }
 
@@ -2538,6 +2553,46 @@ mod tests {
         let mut app = App::new(vec![profile], 0);
         app.modal = modal;
         app
+    }
+
+    /// `o` opens browse-by-name from normal mode on any profile (#161).
+    #[test]
+    fn o_opens_the_open_repository_prompt() {
+        let (tx, _rx) = mpsc::channel(8);
+        let client = test_client();
+        let mut app = app_with_modal(Modal::None);
+        handle_key(
+            &mut app,
+            KeyCode::Char('o'),
+            KeyModifiers::NONE,
+            &client,
+            &tx,
+        );
+        assert!(matches!(
+            app.modal,
+            Modal::Input {
+                on_confirm: InputAction::BrowseRepo,
+                ..
+            }
+        ));
+    }
+
+    /// While a filter is being typed, `o` is a letter, not a command.
+    #[test]
+    fn o_types_into_an_active_filter() {
+        let (tx, _rx) = mpsc::channel(8);
+        let client = test_client();
+        let mut app = app_with_modal(Modal::None);
+        app.filter_mode = Some(Focus::Repos);
+        handle_key(
+            &mut app,
+            KeyCode::Char('o'),
+            KeyModifiers::NONE,
+            &client,
+            &tx,
+        );
+        assert!(matches!(app.modal, Modal::None));
+        assert_eq!(app.repo_filter, "o");
     }
 
     // -----------------------------------------------------------------------

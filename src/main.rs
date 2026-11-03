@@ -127,6 +127,8 @@ async fn main() -> anyhow::Result<()> {
             owner: cli.owner.clone(),
             aws_profile: cli.aws_profile.clone(),
             region: cli.region.clone(),
+            // No `--repo` flag: `o` opens any repository in an ad-hoc session.
+            repositories: Vec::new(),
         };
         config.registry.insert(0, profile);
         0

@@ -119,11 +119,13 @@ type = "ecr-public"
 
 # Helm charts in OCI registries need no special entry — a chart is just a
 # repository in an ordinary registry, recognised per tag. Harbor refuses the
-# repo list to anonymous users, so a browse-by-name prompt opens: type
-# `library/n8n` (from oci://8gears.container-registry.com/library/n8n).
+# repo list to anonymous users, so name the repositories you want with
+# `repositories`; they are listed straight away (marked ★). Press `o` to open
+# any other repository by name.
 [[registry]]
 name = "8gears"
 url = "https://8gears.container-registry.com"
+repositories = ["library/n8n"]
 ```
 
 Helm chart OCI registries: see [docs/helm-oci-charts.md](docs/helm-oci-charts.md).
@@ -140,6 +142,7 @@ Per-profile keys:
 | `owner` | `ghcr` only. User or organisation whose packages to list. Omit for your own |
 | `aws_profile` | ECR only. AWS named profile to resolve credentials from. Omit to use the AWS chain (`$AWS_PROFILE`, then `default`) |
 | `region` | `ecr` only. AWS region whose registry to browse. Omit to use the chain (`$AWS_REGION`, then the profile's region) |
+| `repositories` | Optional list of repositories to show in the Repos pane straight away (marked `★`), ahead of whatever discovery finds. When discovery fails — Harbor/Quay refuse the catalog anonymously, GHCR lists packages only with a token — these are the list, and the failure is a status message rather than a prompt. `standard`, `dockerhub` and `ghcr` only; rejected for `artifactory` and the ECR types. Names must be valid OCI repository names (lowercase, `/`-separated); duplicates are ignored |
 
 ### Credentials / keyring
 
@@ -223,6 +226,7 @@ Full details of every context: [docs/keybindings.md](docs/keybindings.md).
 | `Tab` / `→` | Next panel (Repos → Tags → Detail) |
 | `Shift-Tab` / `←` | Previous panel |
 | `Enter` | Move to Tags (Repos) / inspect the selected tag (Tags) |
+| `o` | Open a repository by name — for repositories not in the list, on any registry |
 
 ### Filter
 

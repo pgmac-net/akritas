@@ -660,7 +660,15 @@ pub struct App {
     pub tags: Vec<String>,
     pub tags_state: ListState,
     // Raw loaded data
+    /// Repositories discovered from the server, in server order. Kept apart
+    /// from `repo_seeds` on purpose: the catalog pagination cursor is
+    /// `repos_all.last()`, and a configured seed mixed in here would be sent
+    /// as `last=` and skip or repeat a page.
     repos_all: Vec<String>,
+    /// The active profile's configured `repositories`, shown first in the
+    /// Repos pane (with a marker) and merged with `repos_all` by
+    /// `apply_repo_filter`.
+    repo_seeds: Vec<String>,
     tags_all: Vec<String>,
     // Filters
     pub repo_filter: String,
@@ -751,7 +759,7 @@ impl App {
             .get(idx)
             .map(|p| p.display_url())
             .unwrap_or_default();
-        Self {
+        let mut app = Self {
             focus: Focus::Repos,
             filter_mode: None,
             repos: Vec::new(),
@@ -759,6 +767,7 @@ impl App {
             tags: Vec::new(),
             tags_state: ListState::default(),
             repos_all: Vec::new(),
+            repo_seeds: Vec::new(),
             tags_all: Vec::new(),
             repo_filter: String::new(),
             tag_filter: String::new(),
@@ -790,7 +799,9 @@ impl App {
             ghcr_owner_cache: HashMap::new(),
             ecr_repo_cache: HashMap::new(),
             aws_profile_cache: Vec::new(),
-        }
+        };
+        app.load_repo_seeds();
+        app
     }
 
     // ------------------------------------------------------------------
@@ -810,6 +821,28 @@ impl App {
             .profiles
             .get(self.active_profile_idx)
             .is_some_and(|p| p.is_dockerhub());
+
+        // With configured repositories there is still a list to browse, so a
+        // failed discovery is news, not a dead end: keep the list, say why
+        // nothing was added, and don't interrupt with the browse prompt
+        // (`o` opens any other repository). Docker Hub still gets its search
+        // picker, which is the only route to search.
+        if !self.repo_seeds.is_empty() {
+            self.repo_load = LoadState::Idle;
+            self.set_status(format!(
+                "Repository discovery failed ({msg}) — showing configured repositories"
+            ));
+            if is_dh && show_browse && matches!(self.modal, Modal::None) {
+                self.modal = Modal::SearchPicker {
+                    input: InputState::default(),
+                    results: Vec::new(),
+                    selected: 0,
+                    searching: false,
+                };
+            }
+            return;
+        }
+
         let display = if is_dh {
             "We can't show you these, please search for an image".to_owned()
         } else {
@@ -920,6 +953,43 @@ impl App {
         self.filter_mode = None;
         self.catalog_attempt = CatalogAttempt::Initial;
         self.current_artifactory_repo_key = None;
+        self.load_repo_seeds();
+    }
+
+    /// Take the active profile's configured `repositories` and show them.
+    ///
+    /// Called on every reset, so a registry switch replaces the previous
+    /// profile's seeds rather than leaking them. Only re-filters when there is
+    /// something to show, so a seedless profile keeps exactly the selection
+    /// state it had before seeds existed.
+    pub fn load_repo_seeds(&mut self) {
+        self.repo_seeds = self
+            .profiles
+            .get(self.active_profile_idx)
+            .map(|p| p.repositories.clone())
+            .unwrap_or_default();
+        if !self.repo_seeds.is_empty() {
+            self.apply_repo_filter();
+        }
+    }
+
+    /// Whether `repo` came from the profile's `repositories` list — the
+    /// renderer marks those rows.
+    pub fn is_seeded(&self, repo: &str) -> bool {
+        self.repo_seeds.iter().any(|s| s == repo)
+    }
+
+    /// Open the browse-by-name prompt on demand (`o`), for any profile.
+    ///
+    /// Until this existed the prompt was reachable only when discovery
+    /// failed — and with configured repositories it no longer pops up on
+    /// failure, so without `o` anything unseeded would be unreachable.
+    pub fn start_open_repo(&mut self) {
+        self.modal = Modal::Input {
+            prompt: "Open repository by name:".to_owned(),
+            input: InputState::default(),
+            on_confirm: InputAction::BrowseRepo,
+        };
     }
 
     /// Clear all repo/tag/detail state when switching registries.
@@ -968,6 +1038,10 @@ impl App {
         self.focus = Focus::Repos;
         self.filter_mode = None;
 
+        // Seeds survive a reload: they come from config, not the server.
+        if !self.repo_seeds.is_empty() {
+            self.apply_repo_filter();
+        }
         self.repo_load = LoadState::Loading;
     }
 
@@ -1627,15 +1701,17 @@ impl App {
 
     fn apply_repo_filter(&mut self) {
         let filter = self.repo_filter.to_lowercase();
-        self.repos = if filter.is_empty() {
-            self.repos_all.clone()
-        } else {
+        // Seeds first in config order, then discovered repositories in server
+        // order, skipping any already seeded.
+        let merged = self.repo_seeds.iter().chain(
             self.repos_all
                 .iter()
-                .filter(|r| r.to_lowercase().contains(&filter))
-                .cloned()
-                .collect()
-        };
+                .filter(|r| !self.repo_seeds.contains(r)),
+        );
+        self.repos = merged
+            .filter(|r| filter.is_empty() || r.to_lowercase().contains(&filter))
+            .cloned()
+            .collect();
         self.clamp_repo_selection();
     }
 
@@ -2013,6 +2089,184 @@ mod tests {
 
         assert_eq!(app.tags, ["3.0.0"]);
         assert_eq!(app.selected_tag(), Some("3.0.0"));
+    }
+
+    // -----------------------------------------------------------------------
+    // `repositories` seed list (issue #161)
+    // -----------------------------------------------------------------------
+
+    fn seeded_profile(name: &str, kind: RegistryType, seeds: &[&str]) -> RegistryProfile {
+        RegistryProfile {
+            name: name.to_owned(),
+            url: Some("https://h.example.com".to_owned()),
+            registry_type: kind,
+            repositories: seeds.iter().map(|s| (*s).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    fn seeded_app(seeds: &[&str]) -> App {
+        App::new(vec![seeded_profile("h", RegistryType::Standard, seeds)], 0)
+    }
+
+    #[test]
+    fn seeds_are_listed_before_any_fetch_returns() {
+        let app = seeded_app(&["library/n8n", "library/redis"]);
+        assert_eq!(app.repos, ["library/n8n", "library/redis"]);
+        assert_eq!(app.selected_repo(), Some("library/n8n"));
+        assert!(app.is_seeded("library/n8n"));
+        assert!(!app.is_seeded("other/repo"));
+    }
+
+    /// Server pages append after the seeds, skip anything already seeded,
+    /// and — the reason seeds live apart from `repos_all` — leave the
+    /// pagination cursor on the last *server* item.
+    #[test]
+    fn server_pages_merge_after_seeds_and_the_cursor_ignores_seeds() {
+        let mut app = seeded_app(&["z/seed", "b/both"]);
+        app.on_repos_page(vec!["a/one".to_owned(), "b/both".to_owned()], true);
+        assert_eq!(app.repos, ["z/seed", "b/both", "a/one"]);
+        assert_eq!(app.repos_cursor.as_deref(), Some("b/both"));
+
+        app.on_repos_page(vec!["c/two".to_owned()], false);
+        assert_eq!(app.repos, ["z/seed", "b/both", "a/one", "c/two"]);
+        assert_eq!(app.repos_cursor.as_deref(), Some("c/two"));
+    }
+
+    #[test]
+    fn discovery_failure_with_seeds_keeps_the_list_and_opens_nothing() {
+        let mut app = seeded_app(&["library/n8n"]);
+        app.on_repos_error("unauthorized".to_owned(), true);
+        assert!(matches!(app.modal, Modal::None), "{:?}", app.modal);
+        assert!(matches!(app.repo_load, LoadState::Idle));
+        assert_eq!(app.repos, ["library/n8n"]);
+        assert!(
+            app.status_text()
+                .is_some_and(|s| s.contains("configured repositories"))
+        );
+    }
+
+    #[test]
+    fn discovery_failure_without_seeds_still_offers_browse_by_name() {
+        let mut app = seeded_app(&[]);
+        app.on_repos_error("unauthorized".to_owned(), true);
+        assert!(matches!(
+            app.modal,
+            Modal::Input {
+                on_confirm: InputAction::BrowseRepo,
+                ..
+            }
+        ));
+    }
+
+    /// Docker Hub search has no other way in, so it still opens — the seeds
+    /// sit behind it.
+    #[test]
+    fn dockerhub_with_seeds_still_opens_search() {
+        let mut app = App::new(
+            vec![seeded_profile(
+                "hub",
+                RegistryType::DockerHub,
+                &["library/nginx"],
+            )],
+            0,
+        );
+        app.on_repos_error("no catalog".to_owned(), true);
+        assert!(matches!(app.modal, Modal::SearchPicker { .. }));
+        assert_eq!(app.repos, ["library/nginx"]);
+    }
+
+    #[test]
+    fn ghcr_packages_merge_with_seeds() {
+        let mut app = App::new(
+            vec![seeded_profile(
+                "g",
+                RegistryType::Ghcr,
+                &["actions/arc-charts/gha-runner-scale-set"],
+            )],
+            0,
+        );
+        app.start_ghcr_switch(0);
+        app.on_ghcr_packages(vec!["pgmac-net/tool".to_owned()], false);
+        assert_eq!(
+            app.repos,
+            ["actions/arc-charts/gha-runner-scale-set", "pgmac-net/tool"]
+        );
+    }
+
+    /// An anonymous GHCR profile cannot list packages at all; with seeds that
+    /// failure is a status line, not a prompt.
+    #[test]
+    fn ghcr_package_error_with_seeds_keeps_the_list() {
+        let mut app = App::new(
+            vec![seeded_profile(
+                "g",
+                RegistryType::Ghcr,
+                &["actions/arc-charts/gha-runner-scale-set"],
+            )],
+            0,
+        );
+        app.start_ghcr_switch(0);
+        app.on_ghcr_packages_error("no GitHub token".to_owned());
+        assert!(matches!(app.modal, Modal::None), "{:?}", app.modal);
+        assert_eq!(app.repos, ["actions/arc-charts/gha-runner-scale-set"]);
+    }
+
+    #[test]
+    fn repo_filter_covers_seeds_and_discovered_repos() {
+        let mut app = seeded_app(&["library/n8n", "charts/n8n-extra"]);
+        app.on_repos_page(
+            vec!["other/n8n-tools".to_owned(), "other/redis".to_owned()],
+            false,
+        );
+        app.repo_filter = "n8n".to_owned();
+        app.apply_repo_filter();
+        assert_eq!(
+            app.repos,
+            ["library/n8n", "charts/n8n-extra", "other/n8n-tools"]
+        );
+    }
+
+    /// Seeds are per profile: switching must not leak the previous profile's.
+    #[test]
+    fn switching_registry_replaces_the_seeds() {
+        let mut app = App::new(
+            vec![
+                seeded_profile("one", RegistryType::Standard, &["a/seed"]),
+                seeded_profile("two", RegistryType::Standard, &[]),
+            ],
+            0,
+        );
+        assert_eq!(app.repos, ["a/seed"]);
+        app.start_registry_switch(1);
+        assert!(app.repos.is_empty());
+        assert!(!app.is_seeded("a/seed"));
+        app.start_registry_switch(0);
+        assert_eq!(app.repos, ["a/seed"]);
+    }
+
+    /// A credential retry reloads the catalog in place; the seeds come from
+    /// config, so they must survive it.
+    #[test]
+    fn restart_catalog_load_keeps_the_seeds() {
+        let mut app = seeded_app(&["library/n8n"]);
+        app.on_repos_page(vec!["x/y".to_owned()], false);
+        app.restart_catalog_load();
+        assert_eq!(app.repos, ["library/n8n"]);
+        assert!(matches!(app.repo_load, LoadState::Loading));
+    }
+
+    #[test]
+    fn start_open_repo_opens_the_browse_input() {
+        let mut app = seeded_app(&[]);
+        app.start_open_repo();
+        assert!(matches!(
+            app.modal,
+            Modal::Input {
+                on_confirm: InputAction::BrowseRepo,
+                ..
+            }
+        ));
     }
 
     fn make_app_with_tags(repo: &str, tags: Vec<&str>) -> App {

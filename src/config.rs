@@ -254,6 +254,18 @@ pub struct RegistryProfile {
     /// which is a single global registry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// Repositories to show in the Repos pane straight away, ahead of (and
+    /// merged with) whatever discovery finds.
+    ///
+    /// For registries whose discovery fails for this profile — Harbor and Quay
+    /// refuse `/v2/_catalog` anonymously, GHCR lists packages only for a PAT —
+    /// these are the whole list. Accepted for `standard`, `dockerhub` and
+    /// `ghcr`; rejected for `artifactory` (the Repos pane belongs to a
+    /// repo-key picked at runtime) and the ECR types (`DescribeRepositories`
+    /// already lists everything). Validated against the OCI repository-name
+    /// grammar and de-duplicated on load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repositories: Vec<String>,
 }
 
 impl RegistryProfile {
@@ -558,6 +570,10 @@ impl Config {
             if let Some(url) = &mut profile.url {
                 *url = normalize_registry_url(url);
             }
+            // Duplicates are harmless, so dropped silently; first one wins so
+            // the configured order is kept.
+            let mut seen = HashSet::new();
+            profile.repositories.retain(|r| seen.insert(r.clone()));
         }
         config.validate()?;
         Ok(config)
@@ -604,6 +620,37 @@ impl Config {
                     "Registry name '{}' must not contain '#'",
                     profile.name
                 ));
+            }
+
+            if !profile.repositories.is_empty() {
+                if profile.is_artifactory() {
+                    return Err(anyhow::anyhow!(
+                        "Registry '{}' sets `repositories`, which Artifactory does not \
+                         support: its repositories belong to a repo-key picked at \
+                         runtime. Remove the list.",
+                        profile.name
+                    ));
+                }
+                if profile.is_any_ecr() {
+                    return Err(anyhow::anyhow!(
+                        "Registry '{}' sets `repositories`, which ECR does not need: \
+                         every repository the credential can see is already listed. \
+                         Remove the list.",
+                        profile.name
+                    ));
+                }
+                if let Some(bad) = profile
+                    .repositories
+                    .iter()
+                    .find(|r| !crate::registry::valid_repository_name(r))
+                {
+                    return Err(anyhow::anyhow!(
+                        "Registry '{}' has invalid repository name '{bad}' in \
+                         `repositories`: use lowercase path components separated by \
+                         '/', e.g. \"library/n8n\".",
+                        profile.name
+                    ));
+                }
             }
 
             // Basic and Bearer both send a username; failing here beats
@@ -956,6 +1003,7 @@ url = "registry.example.com"
             owner: None,
             aws_profile: None,
             region: None,
+            repositories: Vec::new(),
         }
     }
 
@@ -1403,5 +1451,74 @@ url = "registry.example.com"
             profile.display_url(),
             "https://1.dkr.ecr.ap-southeast-2.amazonaws.com"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // `repositories` seed list (issue #161)
+    // -----------------------------------------------------------------------
+
+    fn seeded(type_and_url: &str, repos: &str) -> anyhow::Result<Config> {
+        Config::parse(&format!(
+            "[[registry]]\nname = \"r\"\n{type_and_url}\nrepositories = {repos}\n"
+        ))
+    }
+
+    #[test]
+    fn repositories_accepted_for_standard_dockerhub_and_ghcr() {
+        for kind in [
+            "url = \"https://h.example.com\"",
+            "url = \"https://registry-1.docker.io\"\ntype = \"dockerhub\"",
+            "url = \"https://ghcr.io\"\ntype = \"ghcr\"",
+        ] {
+            let config =
+                seeded(kind, "[\"library/n8n\"]").unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(config.registry[0].repositories, ["library/n8n"]);
+        }
+    }
+
+    #[test]
+    fn repositories_default_to_empty_and_empty_is_absent() {
+        let absent =
+            Config::parse("[[registry]]\nname = \"r\"\nurl = \"https://h.example.com\"\n").unwrap();
+        assert!(absent.registry[0].repositories.is_empty());
+        let empty = seeded("url = \"https://h.example.com\"", "[]").unwrap();
+        assert!(empty.registry[0].repositories.is_empty());
+    }
+
+    #[test]
+    fn repositories_are_deduplicated_keeping_first_occurrence_order() {
+        let config = seeded(
+            "url = \"https://h.example.com\"",
+            "[\"b/x\", \"a/y\", \"b/x\"]",
+        )
+        .unwrap();
+        assert_eq!(config.registry[0].repositories, ["b/x", "a/y"]);
+    }
+
+    /// Artifactory's Repos pane belongs to a repo-key picked at runtime, and
+    /// ECR lists everything already — a seed list there is a mistake to report.
+    #[test]
+    fn repositories_rejected_for_artifactory_and_ecr() {
+        for (kind, why) in [
+            (
+                "url = \"https://a.example.com/artifactory\"\ntype = \"artifactory\"",
+                "Artifactory",
+            ),
+            ("type = \"ecr\"", "ECR"),
+            ("type = \"ecr-public\"", "ECR"),
+        ] {
+            let err = seeded(kind, "[\"a/b\"]").unwrap_err().to_string();
+            assert!(err.contains("'r'") && err.contains(why), "{kind}: {err}");
+        }
+    }
+
+    #[test]
+    fn repositories_rejects_invalid_names_naming_the_entry() {
+        for bad in ["Library/N8N", "a//b", "../etc", "a b", "", "x;y"] {
+            let err = seeded("url = \"https://h.example.com\"", &format!("[\"{bad}\"]"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("'{bad}'")), "{bad}: {err}");
+        }
     }
 }
