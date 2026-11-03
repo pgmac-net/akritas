@@ -1807,7 +1807,11 @@ impl App {
     // ------------------------------------------------------------------
 
     pub fn copy_pull_url(&mut self) {
-        let Some(pull_url) = self.detail.as_ref().map(|d| d.copy_text().to_owned()) else {
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        let Some(pull_url) = detail.copy_text().map(str::to_owned) else {
+            self.set_status("Nothing copied: name or tag is not a valid OCI reference".to_owned());
             return;
         };
         match clipboard::copy_to_clipboard(&pull_url) {

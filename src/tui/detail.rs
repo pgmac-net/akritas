@@ -34,6 +34,12 @@ pub struct HelmInfo {
 /// Build the `helm pull` command, or `None` if any part is not a valid OCI
 /// name. Allow-lists, so nothing shell-significant can get through.
 fn helm_pull_command(host: &str, repo: &str, tag: &str) -> Option<String> {
+    valid_oci_ref(host, repo, tag).then(|| format!("helm pull oci://{host}/{repo} --version {tag}"))
+}
+
+/// True when host, repository and tag are all valid OCI names — the gate for
+/// anything copied to the clipboard, since pasted text reaches a shell.
+fn valid_oci_ref(host: &str, repo: &str, tag: &str) -> bool {
     let host_ok = !host.is_empty()
         && host
             .chars()
@@ -55,7 +61,7 @@ fn helm_pull_command(host: &str, repo: &str, tag: &str) -> Option<String> {
             .next()
             .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
         && tag_chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
-    (host_ok && repo_ok && tag_ok).then(|| format!("helm pull oci://{host}/{repo} --version {tag}"))
+    host_ok && repo_ok && tag_ok
 }
 
 /// Registry-supplied text is rendered into the terminal: strip control
@@ -68,6 +74,10 @@ fn clean(text: String) -> String {
 pub struct ImageDetail {
     /// `Some` when this tag is a Helm chart rather than a container image.
     pub helm: Option<HelmInfo>,
+    /// What `c` copies, or `None` when the name or tag fails OCI validation.
+    /// Fails closed: the text is pasted into a shell, so an invalid reference
+    /// is never offered, for charts and images alike.
+    pub copyable: Option<String>,
     pub digest: String,
     pub content_type: String,
     pub created: Option<String>,
@@ -83,14 +93,28 @@ pub struct ImageDetail {
 impl ImageDetail {
     /// What `c` puts on the clipboard: the `helm pull` command for a chart, the
     /// image pull reference otherwise.
-    pub fn copy_text(&self) -> &str {
-        self.helm
-            .as_ref()
-            .and_then(|h| h.pull_command.as_deref())
-            .unwrap_or(self.pull_url.as_str())
+    pub fn copy_text(&self) -> Option<&str> {
+        self.copyable.as_deref()
     }
 
     pub fn from_manifest_and_config(
+        resp: &ManifestResponse,
+        config: Option<&ImageConfigBlob>,
+        chart: Option<&HelmChartConfig>,
+        repo: &str,
+        tag: &str,
+        registry_url: &str,
+    ) -> Self {
+        let mut detail = Self::build(resp, config, chart, repo, tag, registry_url);
+        detail.copyable = match &detail.helm {
+            Some(h) => h.pull_command.clone(),
+            None => valid_oci_ref(registry_host(registry_url), repo, tag)
+                .then(|| detail.pull_url.clone()),
+        };
+        detail
+    }
+
+    fn build(
         resp: &ManifestResponse,
         config: Option<&ImageConfigBlob>,
         chart: Option<&HelmChartConfig>,
@@ -119,6 +143,7 @@ impl ImageDetail {
                     .cloned();
                 let chart = chart.cloned().unwrap_or_default();
                 Self {
+                    copyable: None,
                     helm: Some(HelmInfo {
                         name: chart.name.map(clean),
                         version: chart.version.map(clean),
@@ -168,6 +193,7 @@ impl ImageDetail {
                     .unwrap_or_default();
 
                 Self {
+                    copyable: None,
                     helm: None,
                     digest: resp.digest.clone(),
                     content_type: resp.content_type.clone(),
@@ -200,6 +226,7 @@ impl ImageDetail {
                     .collect();
 
                 Self {
+                    copyable: None,
                     helm: None,
                     digest: resp.digest.clone(),
                     content_type: resp.content_type.clone(),
@@ -255,12 +282,9 @@ pub fn render_lines(detail: &ImageDetail) -> Vec<Line<'static>> {
             "Pull URL"
         },
         Span::styled(
-            match &detail.helm {
-                Some(h) => h.pull_command.clone().unwrap_or_else(|| {
-                    "unavailable (name or tag is not a valid OCI reference)".to_owned()
-                }),
-                None => detail.pull_url.clone(),
-            },
+            detail.copyable.clone().unwrap_or_else(|| {
+                "unavailable (name or tag is not a valid OCI reference)".to_owned()
+            }),
             URL_STYLE,
         ),
     );
@@ -448,7 +472,7 @@ mod tests {
             "https://8gears.container-registry.com/",
         );
         let cmd = "helm pull oci://8gears.container-registry.com/library/n8n --version 2.2.0-rc.1";
-        assert_eq!(d.copy_text(), cmd);
+        assert_eq!(d.copy_text(), Some(cmd));
         let out = text(&render_lines(&d));
         assert!(out.contains("Helm chart"), "{out}");
         assert!(out.contains(cmd), "{out}");
@@ -472,7 +496,10 @@ mod tests {
             "1.0.0",
             "https://ghcr.io",
         );
-        assert_eq!(d.copy_text(), "helm pull oci://ghcr.io/a/b --version 1.0.0");
+        assert_eq!(
+            d.copy_text(),
+            Some("helm pull oci://ghcr.io/a/b --version 1.0.0")
+        );
         assert!(text(&render_lines(&d)).contains("Helm chart"));
     }
 
@@ -488,7 +515,7 @@ mod tests {
             "https://ghcr.io",
         );
         assert!(d.helm.is_none());
-        assert_eq!(d.copy_text(), "ghcr.io/a/b:1.0.0");
+        assert_eq!(d.copy_text(), Some("ghcr.io/a/b:1.0.0"));
         assert!(!text(&render_lines(&d)).contains("Helm"));
     }
 
@@ -563,5 +590,52 @@ mod security_tests {
     #[test]
     fn clean_strips_control_characters() {
         assert_eq!(clean("a\u{1b}[31mb\n".to_owned()), "a[31mb");
+    }
+}
+
+#[cfg(test)]
+mod fail_closed_tests {
+    use super::*;
+    use crate::registry::{ImageManifest, ManifestDescriptor, media_types};
+
+    fn resp(config_type: &str) -> ManifestResponse {
+        let d = |mt: &str| ManifestDescriptor {
+            media_type: mt.to_owned(),
+            size: 1,
+            digest: "sha256:abc".to_owned(),
+            platform: None,
+        };
+        ManifestResponse {
+            manifest: Manifest::Image(ImageManifest {
+                schema_version: 2,
+                media_type: media_types::OCI_MANIFEST.to_owned(),
+                config: d(config_type),
+                layers: vec![d("application/octet-stream")],
+                annotations: None,
+            }),
+            digest: "sha256:x".to_owned(),
+            content_type: media_types::OCI_MANIFEST.to_owned(),
+            raw: Vec::new(),
+        }
+    }
+
+    /// An invalid tag must copy *nothing* — not fall back to the raw
+    /// reference — for charts and for plain images.
+    #[test]
+    fn invalid_reference_copies_nothing_for_charts_and_images() {
+        for cfg in [
+            media_types::HELM_CONFIG,
+            "application/vnd.oci.image.config.v1+json",
+        ] {
+            let d = ImageDetail::from_manifest_and_config(
+                &resp(cfg),
+                None,
+                None,
+                "a/b",
+                "1.0;rm -rf ~",
+                "https://ghcr.io",
+            );
+            assert_eq!(d.copy_text(), None, "{cfg}");
+        }
     }
 }
