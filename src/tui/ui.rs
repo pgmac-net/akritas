@@ -53,7 +53,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     match &app.modal {
-        Modal::Confirm { message, .. } => draw_confirm_modal(frame, message.clone(), area),
         Modal::DeleteConfirm(dialog) => draw_delete_confirm_modal(frame, dialog, area),
         Modal::Input {
             prompt,
@@ -481,8 +480,6 @@ fn draw_keybindings(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(" diff  "),
             Span::styled("e", Style::default().fg(Color::Cyan)),
             Span::raw(" export  "),
-            Span::styled("P", Style::default().fg(Color::Yellow)),
-            Span::raw(" prune  "),
             Span::styled("d", Style::default().fg(Color::Red)),
             Span::raw(" delete  "),
         ];
@@ -512,22 +509,6 @@ fn popup_rect(area: Rect, min_width: u16, width_pct: u16, height: u16) -> Rect {
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     Rect::new(x, y, width, height)
-}
-
-fn draw_confirm_modal(frame: &mut Frame, message: String, area: Rect) {
-    let modal_area = popup_rect(area, 50, 40, 5);
-
-    frame.render_widget(Clear, modal_area);
-
-    let block = Block::default()
-        .title(" Confirm ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
-    let text = format!("{message}\n\n[y] Confirm  [n/Esc] Cancel");
-    let p = Paragraph::new(text).block(block).wrap(Wrap { trim: true });
-
-    frame.render_widget(p, modal_area);
 }
 
 fn draw_delete_confirm_modal(frame: &mut Frame, dialog: &DeleteConfirm, area: Rect) {
@@ -1202,11 +1183,6 @@ fn help_lines_normal(focus: Focus) -> Vec<Line<'static>> {
 
     match focus {
         Focus::Repos => {
-            lines.push(help_header(
-                "Repository operations  (require a repo selected)",
-            ));
-            lines.push(help_kv("P", "Prune digest-only (untagged) manifests"));
-            lines.push(help_blank());
             lines.push(help_header("Registry"));
             lines.push(help_kv("R", "Switch registry (in-app)"));
             lines.push(help_kv(
@@ -1416,7 +1392,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use super::super::app::{ConfirmAction, InputAction};
+    use super::super::app::InputAction;
     use super::*;
     use crate::config::{RegistryProfile, RegistryType};
     use crate::registry::ArtifactoryRepo;
@@ -1705,13 +1681,6 @@ mod tests {
     #[test]
     fn all_popup_modals_render_without_panic_on_a_small_terminal() {
         for modal in [
-            Modal::Confirm {
-                message: "Prune this?".to_owned(),
-                on_confirm: ConfirmAction::PruneDigestTags {
-                    repo: "r".to_owned(),
-                    tags: Vec::new(),
-                },
-            },
             Modal::DeleteConfirm(super::super::app::DeleteConfirm {
                 repo: "r".to_owned(),
                 tag: "t".to_owned(),
@@ -1810,7 +1779,6 @@ mod tests {
     fn help_sections_do_not_leak_across_normal_mode_focus() {
         let repos_content =
             render_to_string(&mut help_app(HelpContext::Normal(Focus::Repos)), 100, 30);
-        assert!(repos_content.contains("Prune digest-only"));
         assert!(repos_content.contains("Switch registry"));
         assert!(
             !repos_content.contains("Retag"),
@@ -1822,8 +1790,8 @@ mod tests {
         assert!(tags_content.contains("Retag"));
         assert!(tags_content.contains("Cycle tag sort"));
         assert!(
-            !tags_content.contains("Prune digest-only"),
-            "Tags context must not show the Repos-only prune operation"
+            !tags_content.contains("Switch registry"),
+            "Tags context must not show the Repos-only registry section"
         );
     }
 
@@ -2087,5 +2055,25 @@ mod tests {
         let screen = render_to_string(&mut app, 160, 20);
         let footer = screen.lines().last().unwrap_or_default();
         assert!(footer.contains("quit"), "{footer}");
+    }
+
+    /// Prune was removed (#164): it matched tags named `sha256:<hex>`, which
+    /// no spec-compliant registry can hold, so it never worked. Nothing may
+    /// advertise it again.
+    #[test]
+    fn prune_is_not_advertised_anywhere() {
+        let mut app = make_app();
+        let footer = render_to_string(&mut app, 200, 20);
+        assert!(
+            !footer.to_lowercase().contains("prune"),
+            "footer still mentions prune: {footer}"
+        );
+        for focus in [Focus::Repos, Focus::Tags, Focus::Detail] {
+            let help = render_to_string(&mut help_app(HelpContext::Normal(focus)), 100, 40);
+            assert!(
+                !help.to_lowercase().contains("prune"),
+                "{focus:?} help still mentions prune"
+            );
+        }
     }
 }

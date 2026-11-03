@@ -114,7 +114,6 @@ assumes an image config, so charts behave like images:
 | Retag `r` | Works, but the new tag is just a tag: it need not match the chart's `Chart.yaml` `version` |
 | Diff `D` | Works: shows the chart layer added/removed |
 | Delete `d` | Works. It deletes **by digest**, so every tag pointing at that manifest goes with it; since [#163](https://github.com/pgmac-net/docker-registry-walk/issues/163) the confirm dialog names those tags first, the delete is refused if the tag moved meanwhile, and the list is reloaded afterwards (see "Deleting tags" in the README) |
-| Prune `P` | Finds nothing. It matches tags literally named `sha256:<hex>`, which cannot exist on a spec-compliant registry (`:` is not a legal tag character) |
 
 Export writes to `<dest>.partial` and renames it into place only when the
 archive is complete, so a file at the destination is always a whole export.
@@ -131,7 +130,12 @@ and `0.10.0` follows `0.9.3` (issue
 flips the order. Helm's `_` for `+` build metadata is understood. See "Tag sort
 order" in the README.
 
+Prune (`P`) was removed in [#164](https://github.com/pgmac-net/docker-registry-walk/issues/164):
+it looked for tags named `sha256:<hex>`, which no spec-compliant registry can
+hold (`:` is not a legal tag character), and untagged manifests cannot be
+listed through the v2 API, so it never found anything.
+
 ## Not covered (follow-ups)
 
-- Delete removing sibling tags silently, prune never matching, and retag vs
-  `Chart.yaml` `version` (filed as separate issues from #159).
+- Retagging a chart: the new tag need not match `Chart.yaml` `version`
+  ([#165](https://github.com/pgmac-net/docker-registry-walk/issues/165)).

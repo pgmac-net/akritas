@@ -21,8 +21,8 @@ use crate::registry::{
 };
 
 use super::app::{
-    App, CatalogAttempt, ConfirmAction, DeleteLookup, DeleteLookupRequest, Focus, InputAction,
-    InspectModal, LayerDiffModal, LoadState, Modal, help_context_for,
+    App, CatalogAttempt, DeleteLookup, DeleteLookupRequest, Focus, InputAction, InspectModal,
+    LayerDiffModal, LoadState, Modal, help_context_for,
 };
 // Only named directly in tests — production code only ever calls
 // `help_context_for` and stores its result, never spells the type.
@@ -99,15 +99,6 @@ pub enum AppEvent {
         lines: Vec<String>,
     },
     InspectError(String),
-    PruneFound {
-        repo: String,
-        tags: Vec<String>,
-    },
-    PruneComplete {
-        repo: String,
-        count: usize,
-    },
-    PruneError(String),
     ExportProgress {
         done: usize,
         total: usize,
@@ -720,21 +711,6 @@ fn handle_event(app: &mut App, ev: AppEvent, client: &RegistryClient, tx: &mpsc:
             app.modal = Modal::Inspect(Box::new(InspectModal::new(title, lines)));
         }
         AppEvent::InspectError(msg) => app.set_status(format!("✗ Inspect failed: {msg}")),
-        AppEvent::PruneFound { repo, tags } => {
-            if tags.is_empty() {
-                app.set_status(format!("No digest-tagged manifests found in {repo}"));
-            } else {
-                let count = tags.len();
-                app.modal = Modal::Confirm {
-                    message: format!("Delete {count} digest-tagged manifest(s) in '{repo}'?"),
-                    on_confirm: ConfirmAction::PruneDigestTags { repo, tags },
-                };
-            }
-        }
-        AppEvent::PruneComplete { repo, count } => {
-            app.set_status(format!("✓ Pruned {count} manifest(s) in {repo}"));
-        }
-        AppEvent::PruneError(msg) => app.set_status(format!("✗ Prune failed: {msg}")),
         AppEvent::ExportProgress { done, total } => {
             app.set_status(format!("Exporting… {done}/{total} blobs"));
         }
@@ -788,23 +764,6 @@ fn handle_key(
             }
             // `y` before the check finishes (or after it failed) does nothing:
             // the dialog's footer only offers it once it can act.
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
-                app.modal = Modal::None;
-                app.set_status("Cancelled");
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    if matches!(app.modal, Modal::Confirm { .. }) {
-        match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let modal = std::mem::replace(&mut app.modal, Modal::None);
-                if let Modal::Confirm { on_confirm, .. } = modal {
-                    handle_confirm(on_confirm, client, tx);
-                }
-            }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 app.modal = Modal::None;
                 app.set_status("Cancelled");
@@ -1361,7 +1320,6 @@ fn handle_key(
             }
         }
         KeyCode::Char('i') => handle_inspect(app, client, tx),
-        KeyCode::Char('P') => handle_prune(app, client, tx),
         KeyCode::Char('e') => app.start_export(),
         KeyCode::Char('D') => app.start_diff(),
         KeyCode::Char('o') => app.start_open_repo(),
@@ -1391,14 +1349,6 @@ fn open_help(app: &mut App) {
     let context = help_context_for(&current, focus);
     app.help_return = Some(Box::new(current));
     app.modal = Modal::Help { scroll: 0, context };
-}
-
-fn handle_confirm(action: ConfirmAction, client: &RegistryClient, tx: &mpsc::Sender<AppEvent>) {
-    match action {
-        ConfirmAction::PruneDigestTags { repo, tags } => {
-            spawn_prune(client.clone(), repo, tags, tx.clone());
-        }
-    }
 }
 
 /// Keys shared by every single-line `InputState` field: readline-style
@@ -1434,8 +1384,8 @@ fn apply_input_key(input: &mut InputState, code: KeyCode, modifiers: KeyModifier
 /// modal — so every surface that today accepts characters via
 /// `apply_input_key`/`push_filter_char` needs a paste path too, or pasting
 /// into it would silently do nothing once bracketed paste is on (worse than
-/// today's slow-but-working char-by-char). `Modal::Confirm` and normal mode
-/// take no text and are excluded, matching how a stray key is already
+/// today's slow-but-working char-by-char). `Modal::DeleteConfirm` and normal
+/// mode take no text and are excluded, matching how a stray key is already
 /// ignored there.
 fn handle_paste(app: &mut App, text: &str, tx: &mpsc::Sender<AppEvent>) {
     if let Modal::Input { input, .. } = &mut app.modal {
@@ -1561,13 +1511,6 @@ fn handle_inspect(app: &mut App, client: &RegistryClient, tx: &mpsc::Sender<AppE
         return;
     };
     spawn_inspect(client.clone(), repo, tag, tx.clone());
-}
-
-fn handle_prune(app: &mut App, client: &RegistryClient, tx: &mpsc::Sender<AppEvent>) {
-    let Some(repo) = app.current_repo.clone() else {
-        return;
-    };
-    spawn_prune_find(client.clone(), repo, tx.clone());
 }
 
 // ------------------------------------------------------------------
@@ -2105,37 +2048,6 @@ fn spawn_inspect(client: RegistryClient, repo: String, tag: String, tx: mpsc::Se
             }
             Err(e) => {
                 let _ = tx.send(AppEvent::InspectError(e.to_string())).await;
-            }
-        }
-    });
-}
-
-fn spawn_prune_find(client: RegistryClient, repo: String, tx: mpsc::Sender<AppEvent>) {
-    tokio::spawn(async move {
-        match crate::ops::prune::find_digest_tags(&client, &repo).await {
-            Ok(tags) => {
-                let _ = tx.send(AppEvent::PruneFound { repo, tags }).await;
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::PruneError(e.to_string())).await;
-            }
-        }
-    });
-}
-
-fn spawn_prune(
-    client: RegistryClient,
-    repo: String,
-    tags: Vec<String>,
-    tx: mpsc::Sender<AppEvent>,
-) {
-    tokio::spawn(async move {
-        match crate::ops::prune::prune_digest_tags(&client, &repo, &tags).await {
-            Ok(count) => {
-                let _ = tx.send(AppEvent::PruneComplete { repo, count }).await;
-            }
-            Err(e) => {
-                let _ = tx.send(AppEvent::PruneError(e.to_string())).await;
             }
         }
     });
@@ -3100,14 +3012,14 @@ mod tests {
         assert_eq!(normal.repo_filter, "");
         assert!(matches!(normal.modal, Modal::None));
 
-        let mut confirming = app_with_modal(Modal::Confirm {
-            message: "Prune?".to_owned(),
-            on_confirm: ConfirmAction::PruneDigestTags {
+        let mut confirming =
+            app_with_modal(Modal::DeleteConfirm(super::super::app::DeleteConfirm {
                 repo: "r".to_owned(),
-                tags: Vec::new(),
-            },
-        });
+                tag: "t".to_owned(),
+                digest: None,
+                lookup: DeleteLookup::Pending,
+            }));
         handle_paste(&mut confirming, "ignored", &tx);
-        assert!(matches!(confirming.modal, Modal::Confirm { .. }));
+        assert!(matches!(confirming.modal, Modal::DeleteConfirm(_)));
     }
 }
