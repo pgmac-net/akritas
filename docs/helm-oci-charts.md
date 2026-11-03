@@ -111,7 +111,7 @@ assumes an image config, so charts behave like images:
 |----|-----------|
 | Copy-to `C` | Works. Manifest digest is preserved, and `helm pull` of the copy is byte-identical to the original |
 | Export `e` | Works. The OCI-layout tar round-trips: `skopeo copy oci-archive:… docker://…` back into the registry, then `helm pull`, gives the same manifest digest and tarball |
-| Retag `r` | Works, but the new tag is just a tag: it need not match the chart's `Chart.yaml` `version` |
+| Retag `r` | Works, but the new tag is just a tag: it need not match the chart's `Chart.yaml` `version`, and Helm looks a chart up by tag. The retag prompt says so (see below) |
 | Diff `D` | Works: shows the chart layer added/removed |
 | Delete `d` | Works. It deletes **by digest**, so every tag pointing at that manifest goes with it; since [#163](https://github.com/pgmac-net/docker-registry-walk/issues/163) the confirm dialog names those tags first, the delete is refused if the tag moved meanwhile, and the list is reloaded afterwards (see "Deleting tags" in the README) |
 
@@ -135,7 +135,18 @@ it looked for tags named `sha256:<hex>`, which no spec-compliant registry can
 hold (`:` is not a legal tag character), and untagged manifests cannot be
 listed through the v2 API, so it never found anything.
 
-## Not covered (follow-ups)
+## Retagging a chart
 
-- Retagging a chart: the new tag need not match `Chart.yaml` `version`
-  ([#165](https://github.com/pgmac-net/docker-registry-walk/issues/165)).
+`helm push` always tags a chart with its `Chart.yaml` `version` (with `+` written
+as `_`, since `+` is not a legal tag character). A retag is just another tag on
+the same manifest, so it can disagree with the chart's own version, and Helm
+resolves a chart by tag
+([#165](https://github.com/pgmac-net/docker-registry-walk/issues/165)).
+
+- When the tag you retag is a chart, the retag prompt says `Helm chart, version
+  X` and warns that a tag differing from the chart version will not match it.
+  It never blocks: retagging a chart to `stable` or `prod` is a legitimate
+  workflow.
+- The chart's Details show `Version  X  (tag differs)` whenever the viewed tag is
+  not the chart's version, whatever tool made the tag. `1.2.3+build5` matches
+  the tag `1.2.3_build5`.

@@ -241,7 +241,7 @@ Full details of every context: [docs/keybindings.md](docs/keybindings.md).
 |-----|--------|
 | `c` | Copy pull URL to clipboard |
 | `C` | Copy image to another registry/repo |
-| `r` | Retag |
+| `r` | Retag — for a Helm chart the prompt warns that a tag differing from the chart version will not match it |
 | `d` | Delete tag — see "Deleting tags" below |
 | `i` | Inspect manifest & config JSON |
 | `e` | Export as OCI tar archive |
