@@ -30,4 +30,4 @@ Five top-level modules wired together in `src/main.rs`:
 
 ## ops/
 
-One file per image operation (`copy`, `delete`, `diff`, `export`, `inspect`, `prune`, `retag`). Each is called from the TUI event handler and operates directly on `RegistryClient`.
+One file per image operation (`copy`, `delete`, `diff`, `export`, `inspect`, `prune`, `retag`). `delete` is the one with state of its own: `find_siblings` (bounded-concurrency `HEAD`s against the loaded tags, reporting what it could *not* check) feeds the `Modal::DeleteConfirm` dialog, and `delete_pinned` refuses to delete when the tag no longer resolves to the confirmed digest. Each is called from the TUI event handler and operates directly on `RegistryClient`.

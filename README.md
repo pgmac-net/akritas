@@ -243,7 +243,7 @@ Full details of every context: [docs/keybindings.md](docs/keybindings.md).
 | `c` | Copy pull URL to clipboard |
 | `C` | Copy image to another registry/repo |
 | `r` | Retag |
-| `d` | Delete tag |
+| `d` | Delete tag — see "Deleting tags" below |
 | `i` | Inspect manifest & config JSON |
 | `e` | Export as OCI tar archive |
 | `D` | Diff layers against another tag |
@@ -301,6 +301,25 @@ Tags that look like a version are ordered by [SemVer](https://semver.org) preced
 | `?` | Keybindings help |
 | `q` / `Esc` | Quit |
 | `Ctrl-C` | Force quit |
+
+## Deleting tags
+
+A registry deletes a *manifest*, by digest, never a single tag: every tag
+pointing at the same manifest disappears with it. So `d` first resolves the
+selected tag's digest and checks the other loaded tags (up to 200; above that
+it warns generically). The dialog then names every tag that will also be
+removed. It says "No other tag points at this manifest" only when every tag
+was actually checked. When some could not be checked, or more pages were not
+loaded, it says so. `y` is available once the check finishes.
+
+The delete is pinned to the digest shown: if the tag was re-pushed between
+opening the dialog and pressing `y`, nothing is deleted and the footer says
+so. After a delete the tag list is reloaded from the registry, the selection
+moves to the nearest remaining tag, and the footer reports what went, e.g.
+`✓ Deleted charts/demo:0.2.0-retag — also removed: 0.2.0`.
+
+Operation results (delete, copy, retag, export, …) are shown in the bottom bar
+for 5 seconds.
 
 ## Registry requirements
 

@@ -21,8 +21,8 @@ use crate::registry::{
 };
 
 use super::app::{
-    App, CatalogAttempt, ConfirmAction, Focus, InputAction, InspectModal, LayerDiffModal,
-    LoadState, Modal, help_context_for,
+    App, CatalogAttempt, ConfirmAction, DeleteLookup, DeleteLookupRequest, Focus, InputAction,
+    InspectModal, LayerDiffModal, LoadState, Modal, help_context_for,
 };
 // Only named directly in tests — production code only ever calls
 // `help_context_for` and stores its result, never spells the type.
@@ -65,9 +65,18 @@ pub enum AppEvent {
         detail: Box<ImageDetail>,
     },
     DetailError(String),
+    DeleteLookup {
+        repo: String,
+        tag: String,
+        digest: Option<String>,
+        lookup: DeleteLookup,
+    },
     DeleteTagSuccess {
         repo: String,
         tag: String,
+        digest: String,
+        also_removed: Vec<String>,
+        complete: bool,
     },
     DeleteTagError(String),
     CopyProgress {
@@ -681,7 +690,22 @@ fn handle_event(app: &mut App, ev: AppEvent, client: &RegistryClient, tx: &mpsc:
         AppEvent::DetailError(msg) => app.on_detail_error(msg),
         // — Operation dispatch — Add new operation result arms below this line.
         // To wire a new op: add a spawn_* fn, add AppEvent variants, add arm here.
-        AppEvent::DeleteTagSuccess { repo, tag } => app.on_delete_success(&repo, &tag),
+        AppEvent::DeleteLookup {
+            repo,
+            tag,
+            digest,
+            lookup,
+        } => app.on_delete_lookup(&repo, &tag, digest, lookup),
+        AppEvent::DeleteTagSuccess {
+            repo,
+            tag,
+            digest,
+            also_removed,
+            complete,
+        } => {
+            app.on_delete_success(&repo, &tag, &digest, &also_removed, complete);
+            spawn_tags_fetch(client.clone(), repo, None, tx.clone());
+        }
         AppEvent::DeleteTagError(msg) => app.on_delete_error(msg),
         AppEvent::CopyProgress { done, total } => {
             app.set_status(format!("Copying… {done}/{total} blobs"));
@@ -741,6 +765,38 @@ fn handle_key(
     tx: &mpsc::Sender<AppEvent>,
 ) {
     // Modal takes highest priority.
+    if let Modal::DeleteConfirm(dialog) = &app.modal {
+        match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') if dialog.can_confirm() => {
+                if let Modal::DeleteConfirm(d) = std::mem::replace(&mut app.modal, Modal::None) {
+                    let (also_removed, complete) = match &d.lookup {
+                        DeleteLookup::Done(r) => (r.siblings.clone(), r.is_complete()),
+                        _ => (Vec::new(), false),
+                    };
+                    if let Some(digest) = d.digest {
+                        spawn_delete_pinned(
+                            client.clone(),
+                            d.repo,
+                            d.tag,
+                            digest,
+                            also_removed,
+                            complete,
+                            tx.clone(),
+                        );
+                    }
+                }
+            }
+            // `y` before the check finishes (or after it failed) does nothing:
+            // the dialog's footer only offers it once it can act.
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                app.modal = Modal::None;
+                app.set_status("Cancelled");
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if matches!(app.modal, Modal::Confirm { .. }) {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -1299,7 +1355,11 @@ fn handle_key(
             };
             let _ = tx.try_send(event);
         }
-        KeyCode::Char('d') => app.start_delete(),
+        KeyCode::Char('d') => {
+            if let Some(req) = app.start_delete() {
+                spawn_delete_lookup(client.clone(), req, tx.clone());
+            }
+        }
         KeyCode::Char('i') => handle_inspect(app, client, tx),
         KeyCode::Char('P') => handle_prune(app, client, tx),
         KeyCode::Char('e') => app.start_export(),
@@ -1335,9 +1395,6 @@ fn open_help(app: &mut App) {
 
 fn handle_confirm(action: ConfirmAction, client: &RegistryClient, tx: &mpsc::Sender<AppEvent>) {
     match action {
-        ConfirmAction::DeleteManifest { repo, tag } => {
-            spawn_delete(client.clone(), repo, tag, tx.clone());
-        }
         ConfirmAction::PruneDigestTags { repo, tags } => {
             spawn_prune(client.clone(), repo, tags, tx.clone());
         }
@@ -1963,16 +2020,78 @@ fn spawn_retag(
     });
 }
 
-fn spawn_delete(client: RegistryClient, repo: String, tag: String, tx: mpsc::Sender<AppEvent>) {
+/// Resolve the tag's digest, then check the other loaded tags for the same
+/// manifest, and report back to the open delete dialog.
+fn spawn_delete_lookup(
+    client: RegistryClient,
+    req: DeleteLookupRequest,
+    tx: mpsc::Sender<AppEvent>,
+) {
     tokio::spawn(async move {
-        match crate::ops::delete::delete_tag(&client, &repo, &tag).await {
-            Ok(()) => {
-                let _ = tx.send(AppEvent::DeleteTagSuccess { repo, tag }).await;
+        let DeleteLookupRequest {
+            repo,
+            tag,
+            others,
+            total,
+            more_unloaded,
+        } = req;
+        let (digest, lookup) = match client.head_manifest(&repo, &tag).await {
+            Err(e) => (None, DeleteLookup::Failed(e.to_string())),
+            Ok(digest) => {
+                let lookup = match others {
+                    None => DeleteLookup::Skipped { total },
+                    Some(others) => DeleteLookup::Done(
+                        crate::ops::delete::find_siblings(
+                            &client,
+                            &repo,
+                            &digest,
+                            others,
+                            more_unloaded,
+                        )
+                        .await,
+                    ),
+                };
+                (Some(digest), lookup)
             }
-            Err(e) => {
-                let _ = tx.send(AppEvent::DeleteTagError(e.to_string())).await;
-            }
-        }
+        };
+        let _ = tx
+            .send(AppEvent::DeleteLookup {
+                repo,
+                tag,
+                digest,
+                lookup,
+            })
+            .await;
+    });
+}
+
+/// Delete the manifest the user confirmed — refused if the tag has moved.
+fn spawn_delete_pinned(
+    client: RegistryClient,
+    repo: String,
+    tag: String,
+    digest: String,
+    also_removed: Vec<String>,
+    complete: bool,
+    tx: mpsc::Sender<AppEvent>,
+) {
+    use crate::ops::delete::DeleteOutcome;
+    tokio::spawn(async move {
+        let event = match crate::ops::delete::delete_pinned(&client, &repo, &tag, &digest).await {
+            Ok(DeleteOutcome::Deleted) => AppEvent::DeleteTagSuccess {
+                repo,
+                tag,
+                digest,
+                also_removed,
+                complete,
+            },
+            Ok(DeleteOutcome::Moved { now }) => AppEvent::DeleteTagError(format!(
+                "'{tag}' was re-pushed since you confirmed (now {}) — nothing deleted",
+                super::app::short_digest(&now)
+            )),
+            Err(e) => AppEvent::DeleteTagError(e.to_string()),
+        };
+        let _ = tx.send(event).await;
     });
 }
 
@@ -2595,6 +2714,53 @@ mod tests {
         assert_eq!(app.repo_filter, "o");
     }
 
+    /// `y` while the sibling check is still running must not delete — the
+    /// dialog does not yet know what it would take with it.
+    #[test]
+    fn delete_dialog_ignores_y_until_the_check_finishes() {
+        let (tx, _rx) = mpsc::channel(8);
+        let client = test_client();
+        let mut app = app_with_modal(Modal::DeleteConfirm(super::super::app::DeleteConfirm {
+            repo: "r".to_owned(),
+            tag: "t".to_owned(),
+            digest: None,
+            lookup: DeleteLookup::Pending,
+        }));
+        handle_key(
+            &mut app,
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+            &client,
+            &tx,
+        );
+        assert!(matches!(app.modal, Modal::DeleteConfirm(_)));
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE, &client, &tx);
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    /// Once the check is done, `y` closes the dialog and starts the pinned
+    /// delete (spawned, so this needs a runtime).
+    #[tokio::test]
+    async fn delete_dialog_confirms_once_the_check_is_done() {
+        let (tx, _rx) = mpsc::channel(8);
+        let client = test_client();
+        let mut app = app_with_modal(Modal::DeleteConfirm(super::super::app::DeleteConfirm {
+            repo: "r".to_owned(),
+            tag: "t".to_owned(),
+            digest: Some("sha256:abc".to_owned()),
+            lookup: DeleteLookup::Done(crate::ops::delete::SiblingReport::default()),
+        }));
+        handle_key(
+            &mut app,
+            KeyCode::Char('y'),
+            KeyModifiers::NONE,
+            &client,
+            &tx,
+        );
+        assert!(matches!(app.modal, Modal::None));
+    }
+
     // -----------------------------------------------------------------------
     // Progress ticks from inside the runtime (issue #159)
     // -----------------------------------------------------------------------
@@ -2935,10 +3101,10 @@ mod tests {
         assert!(matches!(normal.modal, Modal::None));
 
         let mut confirming = app_with_modal(Modal::Confirm {
-            message: "Delete?".to_owned(),
-            on_confirm: ConfirmAction::DeleteManifest {
+            message: "Prune?".to_owned(),
+            on_confirm: ConfirmAction::PruneDigestTags {
                 repo: "r".to_owned(),
-                tag: "t".to_owned(),
+                tags: Vec::new(),
             },
         });
         handle_paste(&mut confirming, "ignored", &tx);

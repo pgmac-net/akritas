@@ -113,7 +113,7 @@ assumes an image config, so charts behave like images:
 | Export `e` | Works. The OCI-layout tar round-trips: `skopeo copy oci-archive:… docker://…` back into the registry, then `helm pull`, gives the same manifest digest and tarball |
 | Retag `r` | Works, but the new tag is just a tag: it need not match the chart's `Chart.yaml` `version` |
 | Diff `D` | Works: shows the chart layer added/removed |
-| Delete `d` | Works, but deletes **by digest**: every tag pointing at that manifest goes with it, and the tag list is not refreshed afterwards |
+| Delete `d` | Works. It deletes **by digest**, so every tag pointing at that manifest goes with it; since [#163](https://github.com/pgmac-net/docker-registry-walk/issues/163) the confirm dialog names those tags first, the delete is refused if the tag moved meanwhile, and the list is reloaded afterwards (see "Deleting tags" in the README) |
 | Prune `P` | Finds nothing. It matches tags literally named `sha256:<hex>`, which cannot exist on a spec-compliant registry (`:` is not a legal tag character) |
 
 Export writes to `<dest>.partial` and renames it into place only when the
