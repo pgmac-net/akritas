@@ -47,19 +47,19 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            artifact: docker-registry-walk-linux-x86_64
+            artifact: akritas-linux-x86_64
 
           - os: macos-latest
             target: aarch64-apple-darwin
-            artifact: docker-registry-walk-macos-aarch64
+            artifact: akritas-macos-aarch64
 
           - os: macos-latest
             target: x86_64-apple-darwin
-            artifact: docker-registry-walk-macos-x86_64
+            artifact: akritas-macos-x86_64
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: docker-registry-walk-windows-x86_64.exe
+            artifact: akritas-windows-x86_64.exe
 
     steps:
       - uses: actions/checkout@v7
@@ -91,12 +91,12 @@ jobs:
       - name: Rename binary (Unix)
         if: runner.os != 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/docker-registry-walk ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/akritas ${{ matrix.artifact }}
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
         run: |
-          cp target/${{ matrix.target }}/release/docker-registry-walk.exe ${{ matrix.artifact }}
+          cp target/${{ matrix.target }}/release/akritas.exe ${{ matrix.artifact }}
 
       - uses: actions/upload-artifact@v7
         with:

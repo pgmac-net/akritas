@@ -1,5 +1,5 @@
 [package]
-name = "docker-registry-walk"
+name = "akritas"
 version = "0.10.0"
 edition = "2024"
 

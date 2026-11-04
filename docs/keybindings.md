@@ -2,7 +2,7 @@
 
 The in-app help pane (`?`) is **contextual**: it shows only the keys for
 whatever is currently on screen, rather than one long scrolling list of
-everything. Issue [#112](https://github.com/pgmac-net/docker-registry-walk/issues/112).
+everything. Issue [#112](https://github.com/pgmac-net/akritas/issues/112).
 
 ## Why
 

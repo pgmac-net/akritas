@@ -1,6 +1,6 @@
 # Filter query stays visible while a list loads
 
-Issue [#146](https://github.com/pgmac-net/docker-registry-walk/issues/146).
+Issue [#146](https://github.com/pgmac-net/akritas/issues/146).
 
 ## Problem
 

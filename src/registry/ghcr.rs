@@ -18,7 +18,7 @@ use serde::Deserialize;
 use crate::registry::pagination::parse_next_link;
 
 /// Sent on every GitHub API request — GitHub rejects requests without one.
-const USER_AGENT: &str = concat!("docker-registry-walk/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 /// Pinned so a future default-version bump cannot silently reshape the
 /// response this module parses.

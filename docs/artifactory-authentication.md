@@ -1,6 +1,6 @@
 # Artifactory access-token authentication
 
-Issue [#90](https://github.com/pgmac-net/docker-registry-walk/issues/90).
+Issue [#90](https://github.com/pgmac-net/akritas/issues/90).
 
 ## The problem
 
@@ -51,7 +51,7 @@ On a challenge, the token is offered to the realm in this order:
 
 Whichever rung works is cached in a sticky `Mutex<Option<RealmMode>>` and is the only one tried thereafter. Besides saving up to three wasted round trips per 401, this stops repeated failing Basic attempts carrying a *real* username from counting against Artifactory's "Max Failed Login Attempts" policy for that user — which is the reason it is not merely an optimisation.
 
-> **Note:** the ladder was implemented in full because there was no Artifactory instance available to test against while building this, and it still isn't verified live (see [#96](https://github.com/pgmac-net/docker-registry-walk/issues/96)). An attempt to measure it by standing up `jfrog/artifactory-oss` locally (with a real PostgreSQL backend, after the image's embedded-DB path turned out to be gone) hit a harder wall: **Docker repository support itself is a Pro-only feature, absent entirely from OSS** — `PUT /api/repositories/*` and even reading an existing repo's config both return `This REST API is available only in Artifactory Pro`, and the fixed `/api/docker/<repo-key>/v2/...` route 401s unconditionally regardless of credentials once a Docker repo can't exist to serve it. No amount of local wiring gets past a licensed-feature wall, so the question stays open pending either a Pro trial license or a real instance elsewhere. Three read-only curls settle it, if one becomes available:
+> **Note:** the ladder was implemented in full because there was no Artifactory instance available to test against while building this, and it still isn't verified live (see [#96](https://github.com/pgmac-net/akritas/issues/96)). An attempt to measure it by standing up `jfrog/artifactory-oss` locally (with a real PostgreSQL backend, after the image's embedded-DB path turned out to be gone) hit a harder wall: **Docker repository support itself is a Pro-only feature, absent entirely from OSS** — `PUT /api/repositories/*` and even reading an existing repo's config both return `This REST API is available only in Artifactory Pro`, and the fixed `/api/docker/<repo-key>/v2/...` route 401s unconditionally regardless of credentials once a Docker repo can't exist to serve it. No amount of local wiring gets past a licensed-feature wall, so the question stays open pending either a Pro trial license or a real instance elsewhere. Three read-only curls settle it, if one becomes available:
 >
 > ```sh
 > curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $JFROG_ACCESS_TOKEN" \
@@ -151,11 +151,11 @@ type = "artifactory"
 auth = "token"
 ```
 
-1. `JFROG_ACCESS_TOKEN=<token> docker-registry-walk --registry artifactory` → the repo-key picker populates, proving Bearer works on `/api/repositories`.
+1. `JFROG_ACCESS_TOKEN=<token> akritas --registry artifactory` → the repo-key picker populates, proving Bearer works on `/api/repositories`.
 2. Select a repo-key → the catalog lists, proving auth on `/api/docker/<key>/v2/`.
 3. Drill into a tag → manifest and config blob load.
 4. Unset the variable, run `--registry artifactory --token`, paste at the prompt → only mask characters and a `(N chars)` counter appear, and it persists for the next run.
-5. Re-auth regression: while browsing a repo-key, invalidate the token (`secret-tool clear service docker-registry-walk/artifactory username __token__`, and unset the env var), trigger a refetch, then enter a good token → the catalog reloads **and the repo-key context is preserved**.
+5. Re-auth regression: while browsing a repo-key, invalidate the token (`secret-tool clear service akritas/artifactory username __token__`, and unset the env var), trigger a refetch, then enter a good token → the catalog reloads **and the repo-key context is preserved**.
 6. Backward compatibility: an existing username + password Artifactory profile with no `auth` key still uses Basic, unchanged. Docker Hub and standard registries are untouched.
 
 ## Follow-ups

@@ -1,8 +1,8 @@
 # GHCR registry browsing
 
-How `docker-registry-walk` browses GitHub Container Registry (`ghcr.io`), and
+How `akritas` browses GitHub Container Registry (`ghcr.io`), and
 why it does it the way it does. Issue
-[#91](https://github.com/pgmac-net/docker-registry-walk/issues/91).
+[#91](https://github.com/pgmac-net/akritas/issues/91).
 
 ## Configuration
 
@@ -26,7 +26,7 @@ endpoint serves both, so there is no separate org setting.
 Ad hoc, without touching the config:
 
 ```sh
-docker-registry-walk --url https://ghcr.io --type ghcr --owner Homebrew
+akritas --url https://ghcr.io --type ghcr --owner Homebrew
 ```
 
 ## Authentication

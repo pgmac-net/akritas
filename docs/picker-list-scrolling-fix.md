@@ -62,7 +62,7 @@ pass.
 ## Process note
 
 Picked up via `pgmac-workflows:pickup-ticket` against
-`pgmac-net/docker-registry-walk#65`. Plan was posted to the ticket and
+`pgmac-net/akritas#65`. Plan was posted to the ticket and
 approved before implementation; no deviations from the posted plan.
 
-PR: https://github.com/pgmac-net/docker-registry-walk/pull/68
+PR: https://github.com/pgmac-net/akritas/pull/68

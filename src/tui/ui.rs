@@ -189,7 +189,8 @@ fn draw_title(frame: &mut Frame, app: &App, area: Rect) {
         ""
     };
     let title = format!(
-        " docker-registry-walk v{}  │  [{}]  {}{}",
+        " {} v{}  │  [{}]  {}{}",
+        crate::config::APP_NAME,
         env!("CARGO_PKG_VERSION"),
         app.registry_name,
         app.registry_url,

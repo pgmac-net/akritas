@@ -1,8 +1,8 @@
 # AWS ECR registry browsing
 
-How `docker-registry-walk` browses Amazon Elastic Container Registry — both
+How `akritas` browses Amazon Elastic Container Registry — both
 private registries and ECR Public — and why it does it the way it does. Issue
-[#67](https://github.com/pgmac-net/docker-registry-walk/issues/67).
+[#67](https://github.com/pgmac-net/akritas/issues/67).
 
 ## Configuration
 
@@ -38,8 +38,8 @@ every AWS service, so the domain alone proves nothing.
 Ad hoc, without touching the config:
 
 ```sh
-docker-registry-walk --type ecr --aws-profile pgmac --region ap-southeast-2
-docker-registry-walk --type ecr-public
+akritas --type ecr --aws-profile pgmac --region ap-southeast-2
+akritas --type ecr-public
 ```
 
 ## Authentication

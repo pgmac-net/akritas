@@ -120,14 +120,14 @@ environment; behaviour is covered by the logic and render tests above.
 ## Process note
 
 Picked up via `pgmac-workflows:pickup-ticket` against
-`pgmac-net/docker-registry-walk#74`. Plan posted to the ticket and
+`pgmac-net/akritas#74`. Plan posted to the ticket and
 approved before implementation. Rated COMPLEX (new cursor/fold/visible
 display model plus three interacting features across app/event/ui). The
 plan called for Fable 5; Fable 5 was unavailable this session, so
 implementation proceeded on Opus (the recorded fallback) — noted on the
 work-started comment. No functional deviation from the plan.
 
-PR: https://github.com/pgmac-net/docker-registry-walk/pull/76
+PR: https://github.com/pgmac-net/akritas/pull/76
 
 ## Update: tree navigation (issue #130)
 

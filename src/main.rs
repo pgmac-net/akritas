@@ -86,6 +86,22 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // Carry a pre-rename config across before `load` can write the example
+    // over the empty new location. The TUI has not started yet, so stderr is
+    // still a plain terminal and the notice is safe to print.
+    match Config::migrate_legacy() {
+        Ok(Some((old, new))) => eprintln!(
+            "migrated config: {} -> {} (old copy left in place)",
+            old.display(),
+            new.display()
+        ),
+        Ok(None) => {}
+        Err(e) => eprintln!(
+            "warning: could not migrate {}: {e}",
+            Config::legacy_path().display()
+        ),
+    }
+
     // Report a bad config rather than silently starting with none: the
     // fallback is an invented localhost profile, so an unreadable or invalid
     // config otherwise surfaces only as a confusing connection refused.
