@@ -1,6 +1,8 @@
-# docker-registry-walk
+# akritas
 
-An interactive TUI browser for Docker registries, written in Rust.
+An interactive TUI for browsing and managing container, OCI and Helm registries, written in Rust.
+
+> **Formerly `docker-registry-walk`.** Renamed in v0.11.0 ([#173](https://github.com/pgmac-net/akritas/issues/173)): the app outgrew both "docker" and "walk". The name is ἀκρίτας, the Byzantine frontier guard who patrolled the empire's borders. Upgrading? See [Migrating from docker-registry-walk](#migrating-from-docker-registry-walk).
 
 ## Features
 
@@ -26,19 +28,19 @@ An interactive TUI browser for Docker registries, written in Rust.
 
 ### Pre-built binaries
 
-Download the binary for your platform from the [latest release](https://github.com/pgmac-net/docker-registry-walk/releases/latest), make it executable, and place it on your `PATH`.
+Download the binary for your platform from the [latest release](https://github.com/pgmac-net/akritas/releases/latest), make it executable, and place it on your `PATH`.
 
 ```sh
 # Linux example
-chmod +x docker-registry-walk-linux-x86_64
-sudo mv docker-registry-walk-linux-x86_64 /usr/local/bin/docker-registry-walk
+chmod +x akritas-linux-x86_64
+sudo mv akritas-linux-x86_64 /usr/local/bin/akritas
 ```
 
 ### From source
 
 ```sh
 # Prerequisites: Rust stable toolchain (https://rustup.rs)
-cargo install --git https://github.com/pgmac-net/docker-registry-walk
+cargo install --git https://github.com/pgmac-net/akritas
 ```
 
 #### Linux system dependencies
@@ -52,10 +54,20 @@ sudo apt-get install \
 ## Configuration
 
 Config file location:
-- **Linux / macOS**: `~/.config/docker-registry-walk/config.toml`
-- **Windows**: `%APPDATA%\docker-registry-walk\config.toml`
+- **Linux / macOS**: `~/.config/akritas/config.toml`
+- **Windows**: `%APPDATA%\akritas\config.toml`
 
 Created automatically with example content on first run.
+
+### Migrating from docker-registry-walk
+
+v0.11.0 renamed the app from `docker-registry-walk` to `akritas`. Existing settings carry over automatically:
+
+- **Binary**: release artefacts are now `akritas-<os>-<arch>`, so replace the old binary on your `PATH` with the new one. There is no `docker-registry-walk` alias.
+- **Config file**: on first run, if `akritas/config.toml` does not exist but `docker-registry-walk/config.toml` does, the old file is copied across. A one-line `migrated config: … -> …` notice is printed before the TUI starts. The old file is left in place, so it still works if you downgrade.
+- **Keychain**: credentials now live under the service `akritas/<registry-name>`. When a lookup misses there, the old `docker-registry-walk/<registry-name>` entry is read and copied forward silently; the old entry is kept. Deleting a credential removes it under both names, so the old entry cannot bring it back.
+
+The old-name fallbacks will be removed in v0.13.0. Run v0.11.x or v0.12.x at least once before then, so the copies happen.
 
 ```toml
 # Registry to open on startup (optional — defaults to first entry).
@@ -145,18 +157,18 @@ Per-profile keys:
 
 ### Credentials / keyring
 
-Secrets are **never** written to the config file, and never passed as a flag value. They are stored in the OS keychain (macOS Keychain, GNOME Secret Service, Windows Credential Manager) under the key `docker-registry-walk/<registry-name>`.
+Secrets are **never** written to the config file, and never passed as a flag value. They are stored in the OS keychain (macOS Keychain, GNOME Secret Service, Windows Credential Manager) under the key `akritas/<registry-name>`.
 
 Store a password on first use — `--password` takes no value; it prompts interactively with masked input, so the password never appears in your shell history or process list:
 
 ```sh
-docker-registry-walk --registry local --password
+akritas --registry local --password
 ```
 
 Or add a registry on the fly without a config entry:
 
 ```sh
-docker-registry-walk --url https://registry.example.com --username admin --password
+akritas --url https://registry.example.com --username admin --password
 ```
 
 The prompted password is written to the keychain; subsequent runs read from there automatically.
@@ -167,10 +179,10 @@ Set `auth = "token"` on a profile to authenticate with `Authorization: Bearer <t
 
 ```sh
 # Store the token in the keychain (prompts, masked — takes no value).
-docker-registry-walk --registry artifactory --token
+akritas --registry artifactory --token
 
 # Or supply it via the environment, as Terraform does.
-JFROG_ACCESS_TOKEN=<token> docker-registry-walk --registry artifactory
+JFROG_ACCESS_TOKEN=<token> akritas --registry artifactory
 ```
 
 The token is resolved in this order:

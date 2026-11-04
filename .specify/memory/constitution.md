@@ -13,7 +13,7 @@ Templates requiring updates:
 Follow-up TODOs: None — all placeholders resolved
 -->
 
-# docker-registry-walk Constitution
+# akritas Constitution
 
 ## Core Principles
 

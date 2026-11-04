@@ -1,7 +1,7 @@
 # AWS ECR browsing (issue #67)
 
-Work record for [#67](https://github.com/pgmac-net/docker-registry-walk/issues/67),
-delivered as [PR #115](https://github.com/pgmac-net/docker-registry-walk/pull/115)
+Work record for [#67](https://github.com/pgmac-net/akritas/issues/67),
+delivered as [PR #115](https://github.com/pgmac-net/akritas/pull/115)
 on 2026-08-14. For *how to use* the feature, see
 [ecr-registry-browsing.md](ecr-registry-browsing.md); this page is the record
 of how it was decided and built.

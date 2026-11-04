@@ -78,14 +78,14 @@ available in this environment.
 ## Process note
 
 Picked up via `pgmac-workflows:pickup-ticket` against
-`pgmac-net/docker-registry-walk#71`. Design was brainstormed
+`pgmac-net/akritas#71`. Design was brainstormed
 interactively (interaction model, key binding, caching strategy) before
 the plan was posted to the ticket and approved. Implementation proceeded
 on the planning-model session rather than switching to the Sonnet tier
 the approved plan called for (STANDARD complexity) — noted on the
 ticket's work-started comment. No functional deviation from the plan.
 
-PR: https://github.com/pgmac-net/docker-registry-walk/pull/72
+PR: https://github.com/pgmac-net/akritas/pull/72
 
 ## Follow-up: repo-key reselection bug (issue #78)
 
@@ -103,4 +103,4 @@ Fix: always look up the base client by profile name (new
 `active_name`. `OpenArtifactoryRepoPicker` already did this correctly —
 only `ArtifactoryRepoSelected` had the bug.
 
-PR: https://github.com/pgmac-net/docker-registry-walk/pull/79
+PR: https://github.com/pgmac-net/akritas/pull/79

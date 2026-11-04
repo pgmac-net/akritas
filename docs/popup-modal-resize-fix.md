@@ -74,7 +74,7 @@ resize drives), but a live resize is worth a quick manual check.
 ## Process note
 
 Picked up via `pgmac-workflows:pickup-ticket` against
-`pgmac-net/docker-registry-walk#66`. Plan was posted to the ticket and
+`pgmac-net/akritas#66`. Plan was posted to the ticket and
 approved before implementation; no deviations from the posted plan.
 
-PR: https://github.com/pgmac-net/docker-registry-walk/pull/69
+PR: https://github.com/pgmac-net/akritas/pull/69

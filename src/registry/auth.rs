@@ -14,6 +14,7 @@ use reqwest::Client;
 use tokio::sync::Mutex;
 use url::Url;
 
+use crate::config::{APP_NAME, LEGACY_APP_NAME};
 use crate::registry::client::Credentials;
 
 /// Hosts for which plain `http` is acceptable, so local dev registries work.
@@ -741,113 +742,149 @@ fn parse_challenge_params(s: &str) -> Vec<(String, String)> {
 // Keyring
 // ---------------------------------------------------------------------------
 
-/// Stores and retrieves per-registry passwords from the OS keychain.
+/// Stores and retrieves per-registry secrets from the OS keychain.
 ///
-/// Service name format: `docker-registry-walk/<registry-name>`
+/// Service name format: `akritas/<registry-name>`. Entries written before the
+/// rename live under `docker-registry-walk/<registry-name>`; see
+/// [`KeyringStore::get_password`] for how they are carried forward.
 pub struct KeyringStore {
     service: String,
+    legacy_service: String,
+    backend: Box<dyn KeyringBackend>,
 }
 
 impl KeyringStore {
     pub fn new(registry_name: &str) -> Self {
+        Self::with_backend(registry_name, Box::new(OsKeyring))
+    }
+
+    fn with_backend(registry_name: &str, backend: Box<dyn KeyringBackend>) -> Self {
         Self {
-            service: format!("docker-registry-walk/{registry_name}"),
+            service: format!("{APP_NAME}/{registry_name}"),
+            legacy_service: format!("{LEGACY_APP_NAME}/{registry_name}"),
+            backend,
         }
     }
 
-    /// Retrieve the stored password for `username`, if any.
+    /// Retrieve the stored secret for `username`, if any.
+    ///
+    /// Falls back to the pre-rename service name and, on a hit there, copies
+    /// the secret forward under the current name. The legacy entry is left in
+    /// place so a downgrade still finds it. A failed copy is not an error: the
+    /// secret was found, and the next lookup simply copies it again. Nothing
+    /// is logged, because this runs while the TUI owns the terminal.
     pub fn get_password(&self, username: &str) -> Option<String> {
-        self.get_password_keyring(username)
-            .or_else(|| self.get_password_secret_tool(username))
+        if let Some(secret) = self.backend.get(&self.service, username) {
+            return Some(secret);
+        }
+        let secret = self.backend.get(&self.legacy_service, username)?;
+        let _ = self.backend.set(&self.service, username, &secret);
+        Some(secret)
     }
 
+    /// Store `password` for `username` under the current service name only.
+    pub fn set_password(&self, username: &str, password: &str) -> anyhow::Result<()> {
+        self.backend.set(&self.service, username, password)
+    }
+
+    /// Remove the stored credential for `username`, under both names.
+    ///
+    /// Both must go: deleting only the current entry would let
+    /// [`get_password`](Self::get_password) resurrect the credential from the
+    /// legacy one on the very next lookup. Succeeds when either delete does,
+    /// so a legacy entry that never existed is not an error.
+    pub fn delete_password(&self, username: &str) -> anyhow::Result<()> {
+        let current = self.backend.delete(&self.service, username);
+        let legacy = self.backend.delete(&self.legacy_service, username);
+        current.or(legacy)
+    }
+}
+
+/// The keychain operations [`KeyringStore`] needs, keyed by service and
+/// account. A seam so the rename fallback can be tested without an OS keychain.
+trait KeyringBackend: Send + Sync {
+    fn get(&self, service: &str, account: &str) -> Option<String>;
+    fn set(&self, service: &str, account: &str, secret: &str) -> anyhow::Result<()>;
+    fn delete(&self, service: &str, account: &str) -> anyhow::Result<()>;
+}
+
+/// The real keychain: the `keyring` crate, falling back to `secret-tool`.
+struct OsKeyring;
+
+impl KeyringBackend for OsKeyring {
     /// A keyring miss is a routine, expected outcome — it falls through to
-    /// `get_password_secret_tool` and then, if that also misses, to an
-    /// anonymous request or a credential prompt. Logging the error here has
-    /// no channel that doesn't corrupt the display: this runs while the TUI
-    /// holds the alternate screen in raw mode, so writing to stderr paints
-    /// garbage over the rendered frame instead of appearing in a terminal
-    /// scrollback anyone would see.
-    fn get_password_keyring(&self, username: &str) -> Option<String> {
-        keyring::Entry::new(&self.service, username)
+    /// `secret-tool` and then, if that also misses, to an anonymous request or
+    /// a credential prompt. Logging the error here has no channel that doesn't
+    /// corrupt the display: this runs while the TUI holds the alternate screen
+    /// in raw mode, so writing to stderr paints garbage over the rendered frame
+    /// instead of appearing in a terminal scrollback anyone would see.
+    fn get(&self, service: &str, account: &str) -> Option<String> {
+        keyring::Entry::new(service, account)
             .and_then(|e| e.get_password())
             .ok()
+            .or_else(|| secret_tool_lookup(service, account))
     }
 
-    fn get_password_secret_tool(&self, username: &str) -> Option<String> {
-        let output = Command::new("secret-tool")
-            .args(["lookup", "service", &self.service, "username", username])
-            .output()
-            .ok()?;
-        if output.status.success() {
-            let s = String::from_utf8(output.stdout).ok()?;
-            let s = s.trim().to_owned();
-            if s.is_empty() { None } else { Some(s) }
-        } else {
-            None
-        }
+    fn set(&self, service: &str, account: &str, secret: &str) -> anyhow::Result<()> {
+        keyring::Entry::new(service, account)
+            .and_then(|e| e.set_password(secret))
+            .map_err(anyhow::Error::from)
+            .or_else(|_| secret_tool_store(service, account, secret))
     }
 
-    /// Store `password` for `username` in the OS keychain.
-    pub fn set_password(&self, username: &str, password: &str) -> anyhow::Result<()> {
-        self.set_password_keyring(username, password)
-            .or_else(|_| self.set_password_secret_tool(username, password))
+    fn delete(&self, service: &str, account: &str) -> anyhow::Result<()> {
+        keyring::Entry::new(service, account)
+            .and_then(|e| e.delete_credential())
+            .map_err(anyhow::Error::from)
+            .or_else(|_| secret_tool_clear(service, account))
     }
+}
 
-    fn set_password_keyring(&self, username: &str, password: &str) -> anyhow::Result<()> {
-        keyring::Entry::new(&self.service, username)?.set_password(password)?;
+fn secret_tool_lookup(service: &str, account: &str) -> Option<String> {
+    let output = Command::new("secret-tool")
+        .args(["lookup", "service", service, "username", account])
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let s = String::from_utf8(output.stdout).ok()?;
+        let s = s.trim().to_owned();
+        if s.is_empty() { None } else { Some(s) }
+    } else {
+        None
+    }
+}
+
+fn secret_tool_store(service: &str, account: &str, secret: &str) -> anyhow::Result<()> {
+    let label = format!("keyring:{account}@{service}");
+    let mut child = Command::new("secret-tool")
+        .args([
+            "store", "--label", &label, "service", service, "username", account,
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(secret.as_bytes())?;
+    }
+    let status = child.wait()?;
+    if status.success() {
         Ok(())
+    } else {
+        anyhow::bail!("secret-tool store failed with status: {status}")
     }
+}
 
-    fn set_password_secret_tool(&self, username: &str, password: &str) -> anyhow::Result<()> {
-        let label = format!("keyring:{}@{}", username, self.service);
-        let mut child = Command::new("secret-tool")
-            .args([
-                "store",
-                "--label",
-                &label,
-                "service",
-                &self.service,
-                "username",
-                username,
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        use std::io::Write;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(password.as_bytes())?;
-        }
-        let status = child.wait()?;
-        if status.success() {
-            Ok(())
-        } else {
-            anyhow::bail!("secret-tool store failed with status: {status}")
-        }
-    }
-
-    /// Remove the stored credential for `username`.
-    pub fn delete_password(&self, username: &str) -> anyhow::Result<()> {
-        self.delete_password_keyring(username)
-            .or_else(|_| self.delete_password_secret_tool(username))
-    }
-
-    fn delete_password_keyring(&self, username: &str) -> anyhow::Result<()> {
-        keyring::Entry::new(&self.service, username)?.delete_credential()?;
+fn secret_tool_clear(service: &str, account: &str) -> anyhow::Result<()> {
+    let output = Command::new("secret-tool")
+        .args(["clear", "service", service, "username", account])
+        .output()?;
+    if output.status.success() {
         Ok(())
-    }
-
-    fn delete_password_secret_tool(&self, username: &str) -> anyhow::Result<()> {
-        let output = Command::new("secret-tool")
-            .args(["clear", "service", &self.service, "username", username])
-            .output()?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("secret-tool clear failed: {stderr}")
-        }
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("secret-tool clear failed: {stderr}")
     }
 }
 
@@ -1507,5 +1544,147 @@ mod tests {
             realm_attempt_order(Some(RealmMode::BasicConfiguredUser), true, true),
             vec![RealmMode::BasicConfiguredUser]
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // KeyringStore: rename fallback (#173)
+    // -----------------------------------------------------------------------
+
+    /// In-memory keychain shared with the test, so it can inspect what the
+    /// store wrote after handing ownership of the backend over.
+    #[derive(Default)]
+    struct MemKeyring {
+        entries: std::sync::Mutex<std::collections::HashMap<(String, String), String>>,
+        fail_set: bool,
+    }
+
+    impl MemKeyring {
+        fn with(entries: &[(&str, &str, &str)]) -> Arc<Self> {
+            let me = Self::default();
+            for (service, account, secret) in entries {
+                me.entries.lock().unwrap().insert(
+                    ((*service).to_owned(), (*account).to_owned()),
+                    (*secret).to_owned(),
+                );
+            }
+            Arc::new(me)
+        }
+
+        fn has(&self, service: &str, account: &str) -> Option<String> {
+            self.entries
+                .lock()
+                .unwrap()
+                .get(&(service.to_owned(), account.to_owned()))
+                .cloned()
+        }
+    }
+
+    impl KeyringBackend for Arc<MemKeyring> {
+        fn get(&self, service: &str, account: &str) -> Option<String> {
+            self.has(service, account)
+        }
+
+        fn set(&self, service: &str, account: &str, secret: &str) -> anyhow::Result<()> {
+            if self.fail_set {
+                anyhow::bail!("keychain locked");
+            }
+            self.entries
+                .lock()
+                .unwrap()
+                .insert((service.to_owned(), account.to_owned()), secret.to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, service: &str, account: &str) -> anyhow::Result<()> {
+            self.entries
+                .lock()
+                .unwrap()
+                .remove(&(service.to_owned(), account.to_owned()))
+                .map(|_| ())
+                .ok_or_else(|| anyhow::anyhow!("no entry"))
+        }
+    }
+
+    fn store(mem: &Arc<MemKeyring>) -> KeyringStore {
+        KeyringStore::with_backend("local", Box::new(Arc::clone(mem)))
+    }
+
+    #[test]
+    fn keyring_reads_current_service_first() {
+        let mem = MemKeyring::with(&[
+            ("akritas/local", "admin", "new"),
+            ("docker-registry-walk/local", "admin", "old"),
+        ]);
+        assert_eq!(store(&mem).get_password("admin").as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn keyring_falls_back_to_legacy_and_copies_forward() {
+        let mem = MemKeyring::with(&[("docker-registry-walk/local", "admin", "old")]);
+
+        assert_eq!(store(&mem).get_password("admin").as_deref(), Some("old"));
+        assert_eq!(mem.has("akritas/local", "admin").as_deref(), Some("old"));
+        assert_eq!(
+            mem.has("docker-registry-walk/local", "admin").as_deref(),
+            Some("old"),
+            "legacy entry must be left in place"
+        );
+    }
+
+    #[test]
+    fn keyring_legacy_hit_survives_failed_copy_forward() {
+        let mem = Arc::new(MemKeyring {
+            fail_set: true,
+            ..Default::default()
+        });
+        mem.entries.lock().unwrap().insert(
+            ("docker-registry-walk/local".to_owned(), "admin".to_owned()),
+            "old".to_owned(),
+        );
+
+        assert_eq!(store(&mem).get_password("admin").as_deref(), Some("old"));
+        assert_eq!(mem.has("akritas/local", "admin"), None);
+    }
+
+    #[test]
+    fn keyring_miss_on_both_is_none() {
+        let mem = MemKeyring::with(&[]);
+        assert_eq!(store(&mem).get_password("admin"), None);
+    }
+
+    #[test]
+    fn keyring_set_writes_current_service_only() {
+        let mem = MemKeyring::with(&[]);
+        store(&mem).set_password("admin", "pw").unwrap();
+
+        assert_eq!(mem.has("akritas/local", "admin").as_deref(), Some("pw"));
+        assert_eq!(mem.has("docker-registry-walk/local", "admin"), None);
+    }
+
+    #[test]
+    fn keyring_delete_clears_both_so_legacy_cannot_resurrect() {
+        let mem = MemKeyring::with(&[
+            ("akritas/local", "admin", "new"),
+            ("docker-registry-walk/local", "admin", "old"),
+        ]);
+        let store = store(&mem);
+
+        store.delete_password("admin").unwrap();
+        assert_eq!(store.get_password("admin"), None);
+    }
+
+    #[test]
+    fn keyring_delete_ok_when_only_one_name_has_an_entry() {
+        let current_only = MemKeyring::with(&[("akritas/local", "admin", "new")]);
+        assert!(store(&current_only).delete_password("admin").is_ok());
+
+        let legacy_only = MemKeyring::with(&[("docker-registry-walk/local", "admin", "old")]);
+        assert!(store(&legacy_only).delete_password("admin").is_ok());
+    }
+
+    #[test]
+    fn keyring_delete_errors_when_neither_name_has_an_entry() {
+        let mem = MemKeyring::with(&[]);
+        assert!(store(&mem).delete_password("admin").is_err());
     }
 }

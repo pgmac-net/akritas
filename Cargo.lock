@@ -29,6 +29,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "akritas"
+version = "0.10.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-ecr",
+ "aws-sdk-ecrpublic",
+ "base64 0.23.1",
+ "bytes",
+ "clap",
+ "crossterm",
+ "dirs",
+ "keyring",
+ "ratatui",
+ "reqwest",
+ "rpassword",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "url",
+]
+
+[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1299,37 +1330,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.118",
-]
-
-[[package]]
-name = "docker-registry-walk"
-version = "0.10.0"
-dependencies = [
- "anyhow",
- "arboard",
- "async-trait",
- "aws-config",
- "aws-sdk-ecr",
- "aws-sdk-ecrpublic",
- "base64 0.23.1",
- "bytes",
- "clap",
- "crossterm",
- "dirs",
- "keyring",
- "ratatui",
- "reqwest",
- "rpassword",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tar",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "toml",
- "url",
 ]
 
 [[package]]

@@ -1,16 +1,25 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-const EXAMPLE_CONFIG: &str = r#"# docker-registry-walk configuration
-# See: https://github.com/pgmac-net/docker-registry-walk
+/// The application's name: binary, config directory, keychain service prefix,
+/// User-Agent and title bar all derive from it.
+pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
+
+/// The name the application shipped under before the rename to `akritas`
+/// (issue #173). Only read by the one-way migrations of the config file and
+/// keychain entries; due for removal in v0.13.0.
+pub const LEGACY_APP_NAME: &str = "docker-registry-walk";
+
+const EXAMPLE_CONFIG: &str = r#"# akritas configuration
+# See: https://github.com/pgmac-net/akritas
 #
 # Secrets are stored in the OS keyring, never in this file and never in argv.
 # Both flags below take no value — they prompt interactively, masked:
-#   docker-registry-walk --registry <name> --password
-#   docker-registry-walk --registry <name> --token
+#   akritas --registry <name> --password
+#   akritas --registry <name> --token
 
 # Name of the registry to open on startup (optional).
 # default_registry = "local"
@@ -686,17 +695,25 @@ impl Config {
 
     /// Platform-correct path to the config file.
     ///
-    /// * Linux / macOS: `~/.config/docker-registry-walk/config.toml`
-    /// * Windows:       `%APPDATA%\docker-registry-walk\config.toml`
+    /// * Linux / macOS: `~/.config/akritas/config.toml`
+    /// * Windows:       `%APPDATA%\akritas\config.toml`
     pub fn default_path() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("."))
-            })
-            .join("docker-registry-walk")
-            .join("config.toml")
+        config_root().join(APP_NAME).join("config.toml")
+    }
+
+    /// Where the config file lived before the rename to `akritas`.
+    pub fn legacy_path() -> PathBuf {
+        config_root().join(LEGACY_APP_NAME).join("config.toml")
+    }
+
+    /// Copy a pre-rename config file to the current location, if needed.
+    ///
+    /// Must run before [`Config::load`], which would otherwise write the
+    /// example config at the new path and shadow the user's real one.
+    /// Returns the `(old, new)` paths when a copy was made.
+    pub fn migrate_legacy() -> std::io::Result<Option<(PathBuf, PathBuf)>> {
+        let (old, new) = (Self::legacy_path(), Self::default_path());
+        Ok(migrate_legacy_config(&old, &new)?.then_some((old, new)))
     }
 
     /// Index of the default registry in `self.registry`.
@@ -708,6 +725,32 @@ impl Config {
             .and_then(|name| self.registry.iter().position(|r| &r.name == name))
             .unwrap_or(0)
     }
+}
+
+/// The platform config directory that holds the app's own directory.
+fn config_root() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| {
+        std::env::var("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("."))
+    })
+}
+
+/// Copy `old` to `new` when only `old` exists. Returns whether it copied.
+///
+/// One-way and non-destructive: the old file is left where it is, so a
+/// downgrade to a pre-rename build still finds its config. When `new` already
+/// exists it wins and nothing is touched; that is also what keeps this a no-op
+/// on every run after the first.
+fn migrate_legacy_config(old: &Path, new: &Path) -> std::io::Result<bool> {
+    if new.exists() || !old.is_file() {
+        return Ok(false);
+    }
+    if let Some(parent) = new.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(old, new)?;
+    Ok(true)
 }
 
 /// Default a registry URL to `https://` when it names no scheme.
@@ -750,6 +793,49 @@ mod tests {
             registry_type: RegistryType::Standard,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn legacy_config_copied_when_only_old_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("docker-registry-walk/config.toml");
+        let new = dir.path().join("akritas/config.toml");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "default_registry = \"x\"\n").unwrap();
+
+        assert!(migrate_legacy_config(&old, &new).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&new).unwrap(),
+            "default_registry = \"x\"\n"
+        );
+        assert!(old.exists(), "old config must be left in place");
+    }
+
+    #[test]
+    fn legacy_config_not_copied_when_new_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.toml");
+        let new = dir.path().join("new.toml");
+        std::fs::write(&old, "old").unwrap();
+        std::fs::write(&new, "new").unwrap();
+
+        assert!(!migrate_legacy_config(&old, &new).unwrap());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), "new");
+    }
+
+    #[test]
+    fn legacy_config_noop_when_neither_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("akritas/config.toml");
+
+        assert!(!migrate_legacy_config(&dir.path().join("missing.toml"), &new).unwrap());
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn config_paths_use_current_and_legacy_names() {
+        assert!(Config::default_path().ends_with("akritas/config.toml"));
+        assert!(Config::legacy_path().ends_with("docker-registry-walk/config.toml"));
     }
 
     #[test]

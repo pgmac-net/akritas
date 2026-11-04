@@ -4,7 +4,7 @@ Five top-level modules wired together in `src/main.rs`:
 
 | Module | Purpose |
 |--------|---------|
-| `config` | TOML config (`Config`, `RegistryProfile`, `RegistryType`). Created at `~/.config/docker-registry-walk/config.toml` on first run. |
+| `config` | TOML config (`Config`, `RegistryProfile`, `RegistryType`). Created at `~/.config/akritas/config.toml` on first run. |
 | `registry` | Docker Registry v2 async HTTP client + auth. |
 | `tui` | Terminal UI (ratatui + crossterm). Owns the event loop. |
 | `ops` | Image maintenance operations called from TUI actions. |

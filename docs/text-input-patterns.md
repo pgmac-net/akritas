@@ -3,7 +3,7 @@
 Standard pattern for free-text entry fields (popups, single-line prompts).
 Extracted from `gh-issues-tui` (`src/tui/app.rs`, `src/tui/ui.rs`), where it
 was hardened over several releases, and applied here in
-`docker-registry-walk` (`src/tui/input.rs`, issue #59).
+`akritas` (`src/tui/input.rs`, issue #59).
 
 ## `InputState`
 
@@ -126,6 +126,6 @@ a filter string. Keep those on a simpler append/backspace-only API
 
 `gh-issues-tui` also has a `BodyEditor` (one `InputState` per line, plus
 word-wrap and visual-row up/down navigation) for its multi-line issue-body
-and comment editors. Neither `docker-registry-walk` field is multi-line, so
+and comment editors. Neither `akritas` field is multi-line, so
 that piece wasn't ported — see `gh-issues-tui/src/tui/app.rs:695-920` if a
 future field needs it.

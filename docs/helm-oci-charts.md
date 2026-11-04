@@ -1,8 +1,8 @@
 # Helm chart OCI registries
 
-How `docker-registry-walk` browses Helm charts stored in OCI registries
+How `akritas` browses Helm charts stored in OCI registries
 (`helm push` / `oci://…`). Issue
-[#157](https://github.com/pgmac-net/docker-registry-walk/issues/157).
+[#157](https://github.com/pgmac-net/akritas/issues/157).
 
 ## Short answer
 
@@ -20,7 +20,7 @@ do), which is why this is detected per tag and not configured per profile.
 
 `oci://8gears.container-registry.com/library/n8n` — a Harbor registry. Harbor
 refuses `/v2/_catalog` to anonymous users, so name the charts you want with
-`repositories` ([#161](https://github.com/pgmac-net/docker-registry-walk/issues/161)).
+`repositories` ([#161](https://github.com/pgmac-net/akritas/issues/161)).
 They are listed straight away, marked `★`, and the refused catalog is a status
 message instead of a prompt:
 
@@ -103,7 +103,7 @@ Three general behaviours were fixed, and each helps non-Helm registries too:
 ## Other operations on charts
 
 Verified against a local `registry:2` (delete enabled) with charts pushed by
-`helm push` (issue [#159](https://github.com/pgmac-net/docker-registry-walk/issues/159)).
+`helm push` (issue [#159](https://github.com/pgmac-net/akritas/issues/159)).
 These operations are generic manifest and blob operations and nothing in them
 assumes an image config, so charts behave like images:
 
@@ -113,7 +113,7 @@ assumes an image config, so charts behave like images:
 | Export `e` | Works. The OCI-layout tar round-trips: `skopeo copy oci-archive:… docker://…` back into the registry, then `helm pull`, gives the same manifest digest and tarball |
 | Retag `r` | Works, but the new tag is just a tag: it need not match the chart's `Chart.yaml` `version`, and Helm looks a chart up by tag. The retag prompt says so (see below) |
 | Diff `D` | Works: shows the chart layer added/removed |
-| Delete `d` | Works. It deletes **by digest**, so every tag pointing at that manifest goes with it; since [#163](https://github.com/pgmac-net/docker-registry-walk/issues/163) the confirm dialog names those tags first, the delete is refused if the tag moved meanwhile, and the list is reloaded afterwards (see "Deleting tags" in the README) |
+| Delete `d` | Works. It deletes **by digest**, so every tag pointing at that manifest goes with it; since [#163](https://github.com/pgmac-net/akritas/issues/163) the confirm dialog names those tags first, the delete is refused if the tag moved meanwhile, and the list is reloaded afterwards (see "Deleting tags" in the README) |
 
 Export writes to `<dest>.partial` and renames it into place only when the
 archive is complete, so a file at the destination is always a whole export.
@@ -126,11 +126,11 @@ images as well as charts and is fixed in #159.
 
 Chart versions sort by SemVer precedence, newest first, so `0.15.1` is at the top
 and `0.10.0` follows `0.9.3` (issue
-[#160](https://github.com/pgmac-net/docker-registry-walk/issues/160)). `s`
+[#160](https://github.com/pgmac-net/akritas/issues/160)). `s`
 flips the order. Helm's `_` for `+` build metadata is understood. See "Tag sort
 order" in the README.
 
-Prune (`P`) was removed in [#164](https://github.com/pgmac-net/docker-registry-walk/issues/164):
+Prune (`P`) was removed in [#164](https://github.com/pgmac-net/akritas/issues/164):
 it looked for tags named `sha256:<hex>`, which no spec-compliant registry can
 hold (`:` is not a legal tag character), and untagged manifests cannot be
 listed through the v2 API, so it never found anything.
@@ -141,7 +141,7 @@ listed through the v2 API, so it never found anything.
 as `_`, since `+` is not a legal tag character). A retag is just another tag on
 the same manifest, so it can disagree with the chart's own version, and Helm
 resolves a chart by tag
-([#165](https://github.com/pgmac-net/docker-registry-walk/issues/165)).
+([#165](https://github.com/pgmac-net/akritas/issues/165)).
 
 - When the tag you retag is a chart, the retag prompt says `Helm chart, version
   X` and warns that a tag differing from the chart version will not match it.
